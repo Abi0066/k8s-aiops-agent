@@ -14,11 +14,13 @@
 # Documentation : https://prometheus.io/docs/alerting/latest/configuration/
 
 global:
-  # Intervalle entre deux évaluations des règles de routage.
+  # Délai au bout duquel une alerte SANS date de fin est considérée comme
+  # résolue si elle n'est plus renvoyée. Les alertes de Prometheus portent
+  # toujours une date de fin : ce réglage ne vaut que pour d'autres sources.
   resolve_timeout: 5m
 
-  # SMTP — non utilisé dans cette étape. Commenté pour servir de modèle si on
-  # veut brancher l'envoi d'e-mails plus tard.
+  # SMTP — non utilisé. Commenté pour servir de modèle si on veut brancher
+  # l'envoi d'e-mails plus tard.
   # smtp_smarthost: 'smtp.example.com:587'
   # smtp_from: 'alertmanager@example.com'
 
@@ -27,32 +29,30 @@ route:
   # arrive ici.
   receiver: aiops-agent
 
-  # Regroupement : le temps pendant lequel Alertmanager attend avant d'envoyer
-  # le premier groupe d'alertes.
-  #
   # group_by : les labels qui définissent « une même alerte ». En grouper par
   # (alertname, namespace) signifie que 3 pods qui plantent pour la même
   # raison produisent UNE notification au lieu de trois.
   group_by: ['alertname', 'namespace']
 
-  # Délai minimum entre deux envois du même groupe. Évite d'inonder l'agent
-  # si la condition persiste.
+  # Attente avant la PREMIÈRE notification d'un nouveau groupe : laisse le
+  # temps aux alertes sœurs d'arriver pour partir ensemble.
   group_wait: 10s
 
-  # Délai après la première notification avant d'en envoyer une autre pour le
-  # même groupe.
+  # Attente avant de notifier à nouveau un groupe déjà notifié, quand une
+  # alerte y entre ou en sort. Alertmanager renvoie alors tout le groupe :
+  # l'agent écarte les alertes qu'il a déjà analysées.
   group_interval: 1m
 
-  # Délai avant de RENVOYER une alerte qui n'a pas été résolue. 4 h est
-  # reasonable : on ne veut pas notifier toutes les 5 minutes.
+  # Délai avant de RENVOYER un groupe dont rien n'a changé. 4 h est
+  # raisonnable : on ne veut pas relancer une analyse toutes les 5 minutes.
   repeat_interval: 4h
 
   # Règles de routage plus spécifiques que la route par défaut. Alertmanager
-  # évalue les routes de haut en bas et s'arrête à la première qui matche.
+  # évalue les routes de haut en bas et s'arrête à la première qui matche
+  # (sauf `continue: true`).
   #
-  # Pour l'étape 2, on garde une seule route : tout part vers l'agent. Le
-  # routage fin (critical vs warning, URL différentes) sera ajouté à l'étape 3,
-  # une fois qu'on saura comment l'agent doit traiter chaque sévérité.
+  # Une seule route suffit aujourd'hui : l'agent traite toutes les
+  # sévérités. Un routage par sévérité ressemblerait à ceci :
   routes: []
     # - receiver: aiops-agent-critical
     #   matchers:
@@ -60,20 +60,16 @@ route:
     #   continue: true
 
 receivers:
-  # Le receiver principal : notre agent IA.
-  #
-  # L'URL pointe vers le Service Kubernetes de l'agent, qui n'existe pas encore
-  # (c'est l'étape 3). Tant qu'il n'existe pas, Alertmanager échoue la
-  # livraison et le journalise clairement : c'est le comportement attendu et
-  # sans conséquence en étape 2.
-  #
-  # Remplacez ce placeholder par l'URL réelle à l'étape 3.
+  # Le receiver principal : notre agent IA, joint par son Service
+  # Kubernetes (manifests/aiops-agent.yaml). Si l'agent est indisponible,
+  # Alertmanager journalise l'échec et réessaie.
   - name: aiops-agent
     webhook_configs:
       - url: http://aiops-agent.aiops.svc.cluster.local:8080/webhook
         # send_resolved : true envoie aussi un événement quand l'alerte est
-        # résolue (firing -> resolved). L'agent pourra alors indiquer que
-        # l'incident est résolu.
+        # résolue (firing -> resolved). L'agent les reçoit mais n'analyse
+        # aujourd'hui que les alertes actives ; la résolution servira à
+        # confirmer qu'une remédiation automatique a fonctionné.
         send_resolved: true
 
 # Inhibition : une alerte grave masque les alertes moins graves sur la même
@@ -82,6 +78,11 @@ receivers:
 #
 # Exemple : si le pod est down, on n'a pas besoin d'être prévenu aussi d'une
 # latence élevée sur ce même pod — la cause racine est déjà identifiée.
+#
+# `equal` exige que les deux alertes aient la même valeur pour ces labels.
+# Un label absent des deux côtés compte comme égal : DemoAppDown et
+# DemoAppHighLatency n'ont pas de label `pod`, mais doivent toutes deux
+# porter `namespace` (voir monitoring/prometheus/tests/alerts_test.yaml).
 inhibit_rules:
   - source_matchers:
       - alertname="DemoAppDown"

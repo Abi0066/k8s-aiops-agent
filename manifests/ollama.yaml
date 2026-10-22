@@ -7,9 +7,26 @@
 # sur 127.0.0.1 (c'est son comportement par défaut) : le pod ne pourrait
 # pas l'atteindre.
 #
-# Le coût de l'option (a) : ~3.4 Go d'image + 9 Go de modèle, et
-# ~20 Go de RAM pour l'inférence.
+# Le coût de ce choix : ~3.4 Go d'image + ~9 Go de modèle, et jusqu'à
+# 20 Go de RAM pour l'inférence (limite du conteneur).
 
+# ---------------------------------------------------------------------------
+# 0. ConfigMap — le modèle utilisé
+# ---------------------------------------------------------------------------
+# Déclaré une seule fois : l'initContainer ci-dessous le télécharge, et
+# l'agent (manifests/aiops-agent.yaml) lit la même clé pour l'appeler.
+# Changer de modèle = changer cette valeur, puis redémarrer les deux
+# Deployments.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ollama-config
+  namespace: aiops
+  labels:
+    app: ollama
+data:
+  model: "qwen2.5-coder:14b"
+---
 # ---------------------------------------------------------------------------
 # 1. PersistentVolumeClaim — le disque qui abrite le modèle
 # ---------------------------------------------------------------------------
@@ -48,16 +65,34 @@ spec:
       labels:
         app: ollama
     spec:
+      # Ollama reste root : les modèles déjà présents dans le PVC lui
+      # appartiennent. Le reste du durcissement s'applique (seccomp, aucune
+      # capacité Linux, pas d'élévation de privilèges).
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       # --- initContainer : télécharge le modèle -------------------------
       initContainers:
         - name: pull-model
-          image: docker.io/ollama/ollama:latest
+          # Version épinglée : `latest` changerait d'image à chaque
+          # recréation du cluster, sans trace dans Git.
+          image: docker.io/ollama/ollama:0.40.8
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-c"]
+          env:
+            - name: OLLAMA_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: ollama-config
+                  key: model
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           args:
             - |
               set -e
-              echo "=== Téléchargement du modèle qwen2.5-coder:14b dans le PVC ==="
+              echo "=== Modèle ${OLLAMA_MODEL} dans le PVC ==="
               export OLLAMA_MODELS=/models
               echo "OLLAMA_MODELS=${OLLAMA_MODELS}"
               /bin/ollama serve > /tmp/ollama.log 2>&1 &
@@ -75,7 +110,14 @@ spec:
                 fi
                 sleep 1
               done
-              /bin/ollama pull qwen2.5-coder:14b
+              # Déjà dans le PVC : on ne contacte pas le registre. Le pod
+              # redémarre ainsi sans réseau, et sans attendre la
+              # vérification du manifeste distant.
+              if /bin/ollama show "${OLLAMA_MODEL}" > /dev/null 2>&1; then
+                echo "Modèle déjà présent, pas de téléchargement."
+              else
+                /bin/ollama pull "${OLLAMA_MODEL}"
+              fi
               echo "=== Modèles disponibles ==="
               /bin/ollama list
               kill "${OLLAMA_PID}" 2>/dev/null || true
@@ -92,9 +134,13 @@ spec:
       # --- conteneur principal ------------------------------------------
       containers:
         - name: ollama
-          image: docker.io/ollama/ollama:latest
+          image: docker.io/ollama/ollama:0.40.8
           imagePullPolicy: IfNotPresent
           args: ["serve"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           env:
             - name: OLLAMA_MODELS
               value: "/models"
@@ -139,10 +185,14 @@ spec:
         - name: models
           persistentVolumeClaim:
             claimName: ollama-models
+        # Le GPU de l'hôte, pour l'inférence Vulkan (OLLAMA_VULKAN).
+        # DirectoryOrCreate : sur une machine sans GPU, /dev/dri n'existe
+        # pas ; un répertoire vide est créé et Ollama tourne sur CPU au lieu
+        # de bloquer le pod au démarrage.
         - name: dri
           hostPath:
             path: /dev/dri
-            type: Directory
+            type: DirectoryOrCreate
 ---
 # ---------------------------------------------------------------------------
 # 3. Service Ollama
