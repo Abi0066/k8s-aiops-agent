@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -38,7 +39,7 @@ from fastapi.responses import JSONResponse
 
 from .collector import (
     Evidence,
-    build_k8s_clients,
+    build_k8s_client,
     collect_events,
     collect_logs,
     collect_metrics,
@@ -86,32 +87,26 @@ logging.basicConfig(
 log = logging.getLogger("aiops-agent")
 
 # ---------------------------------------------------------------------------
-# Application
+# Cycle de vie
 # ---------------------------------------------------------------------------
-app = FastAPI(
-    title="K8s AI Ops Agent",
-    description=(
-        "Agent d'AIOps qui reçoit les alertes Alertmanager, collecte les "
-        "preuves dans Kubernetes et Prometheus, et demande une cause racine "
-        "à un modèle de langage local."
-    ),
-    version="1.0.0",
-)
-
-# Les clients sont créés au démarrage (lifespan) et partagés : les recreer
+# Les clients sont créés au démarrage (lifespan) et partagés : les recréer
 # à chaque requête serait coûteux (nouvelle connexion TLS à chaque fois).
 core_v1 = None
 http_client: httpx.AsyncClient | None = None
 
 
-@app.on_event("startup")
-async def startup() -> None:
-    """Initialise les clients au démarrage du pod.
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Initialise les clients au démarrage du pod, les ferme à l'arrêt.
 
-    Ce hook est déclenché par uvicorn juste avant d'accepter les requêtes.
-    C'est le bon moment pour créer la connexion HTTP et le client
-    Kubernetes : s'ils échouent ici, le pod ne passe pas Ready et Kubernetes
-    ne route pas de trafic vers lui — c'est le comportement souhaité.
+    Le code avant `yield` est exécuté par uvicorn juste avant d'accepter
+    les requêtes. C'est le bon moment pour créer la connexion HTTP et le
+    client Kubernetes : s'ils échouent ici, le pod ne passe pas Ready et
+    Kubernetes ne route pas de trafic vers lui — c'est le comportement
+    souhaité. Le code après `yield` s'exécute à l'arrêt du pod.
+
+    `lifespan` remplace `@app.on_event("startup"/"shutdown")`, déprécié
+    par FastAPI.
     """
     global core_v1, http_client
 
@@ -120,7 +115,7 @@ async def startup() -> None:
     log.info("  Prometheus : %s", PROMETHEUS_URL)
     log.info("  Namespace  : %s", WATCHED_NAMESPACE)
 
-    core_v1, _sync_core_v1 = build_k8s_clients()
+    core_v1 = await build_k8s_client()
 
     # timeout=None pour httpx : le timeout par défaut (5 s) est trop court
     # pour l'appel au LLM, qui peut prendre une minute. On gère donc les
@@ -143,13 +138,27 @@ async def startup() -> None:
     else:
         log.warning("Ollama injoignable au démarrage : %s", health["error"])
 
+    yield
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    """Ferme proprement le client HTTP au'arrêt du pod."""
-    if http_client is not None:
-        await http_client.aclose()
-        log.info("Client HTTP fermé")
+    await http_client.aclose()
+    if core_v1 is not None:
+        await core_v1.api_client.close()
+    log.info("Clients HTTP et Kubernetes fermés")
+
+
+# ---------------------------------------------------------------------------
+# Application
+# ---------------------------------------------------------------------------
+app = FastAPI(
+    title="K8s AI Ops Agent",
+    description=(
+        "Agent d'AIOps qui reçoit les alertes Alertmanager, collecte les "
+        "preuves dans Kubernetes et Prometheus, et demande une cause racine "
+        "à un modèle de langage local."
+    ),
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +236,8 @@ async def health() -> JSONResponse:
 
     # Le client Kubernetes : on vérifie qu'on peut lister les pods.
     try:
+        if core_v1 is None:
+            raise RuntimeError("client Kubernetes non initialisé")
         await core_v1.list_namespaced_pod(namespace=WATCHED_NAMESPACE, limit=1)
         checks["kubernetes"] = {"ok": True, "error": None}
     except Exception as exc:  # noqa: BLE001
@@ -351,13 +362,13 @@ async def process_alerts(group: AlertGroup) -> None:
         log.exception("Erreur globale pendant le traitement des alertes : %s", exc)
 
 
-async def analyze_one_alert(alert) -> None:
+async def analyze_one_alert(alert: Alert) -> None:
     """Diagnostique une alerte et journalise le résultat."""
     started = datetime.now(timezone.utc)
 
     log.info("=" * 70)
     log.info(
-        "Analyse de l'alerte %s (severité=%s, namespace=%s)",
+        "Analyse de l'alerte %s (sévérité=%s, namespace=%s)",
         alert.alertname,
         alert.severity,
         alert.namespace,
@@ -414,7 +425,7 @@ async def analyze_one_alert(alert) -> None:
     # Le code tranche la cause à partir des champs structurés (raison
     # d'arrêt, code de sortie). Le LLM, lui, se contente de rédiger.
     #
-    # C'est LA qui empeche un modèle 3B de recomposer une histoire plausible
+    # C'est ce qui empêche un modèle 3B de recomposer une histoire plausible
     # mais fausse à partir de données secondaires (comme la limite de
     # mémoire, qui est une constante de configuration et pas un
     # symptôme). Détail dans le module `diagnosis`.
@@ -471,7 +482,7 @@ async def analyze_one_alert(alert) -> None:
                 "timestamp": started.isoformat(),
                 "alertname": alert.alertname,
                 "severity": alert.severity,
-                "namespace": alert.namespace,
+                "namespace": namespace,
                 "pod": evidence.pod_name,
                 "last_termination": evidence.last_termination,
                 "verdict": (

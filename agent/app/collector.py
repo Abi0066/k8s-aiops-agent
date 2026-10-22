@@ -27,8 +27,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from kubernetes import client as k8s_client
-from kubernetes import config as k8s_config
 from kubernetes.aio import client as aio_client
 from kubernetes.aio import config as aio_config
 
@@ -42,7 +40,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Pourquoi limiter la taille des preuves ?
 #
-# Le modèle qwen2.5:3b a une fenêtre de contexte de 4096 tokens (par défaut).
+# Le modèle a une fenêtre de contexte de 4096 tokens (num_ctx, voir llm.py).
 # Si on lui envoie 20 000 tokens de logs, il tronque — ou pire, refuse. Le
 # prompt de diagnostic se retrouverait amputé des informations les plus
 # récentes, qui sont justement les plus pertinentes.
@@ -169,13 +167,14 @@ def _indent_yaml(data: Any, indent: int = 2) -> str:
 # ---------------------------------------------------------------------------
 # Client Kubernetes
 # ---------------------------------------------------------------------------
-def build_k8s_clients() -> tuple:
-    """Construit les clients Kubernetes (async + sync).
+async def build_k8s_client() -> aio_client.CoreV1Api:
+    """Construit le client Kubernetes asynchrone.
 
-    Pourquoi deux clients ? Le client `Async` est indispensable dans un
-    handler `async def` : le client synchrone bloquerait la boucle d'événements
-    pendant tout l'appel réseau. Le client synchrone est conservé comme
-    solution de repli (usage hors boucle async, scripts).
+    Pourquoi le client `Async` ? Dans un handler `async def`, le client
+    synchrone bloquerait la boucle d'événements pendant tout l'appel réseau.
+
+    La fonction est `async` car `kubernetes.aio.config.load_kube_config`
+    est une coroutine : l'appeler sans `await` ne charge rien.
 
     Comment s'authentifier ?
     - Dans le cluster : `load_incluster_config()` lit le token et le
@@ -194,16 +193,14 @@ def build_k8s_clients() -> tuple:
     if in_cluster:
         log.info("Authentification Kubernetes : in-cluster (ServiceAccount)")
         aio_config.load_incluster_config()
-        k8s_config.load_incluster_config()
     else:
         log.info(
             "Authentification Kubernetes : kubeconfig local "
             "(hors cluster — mode développement)"
         )
-        aio_config.load_kube_config()
-        k8s_config.load_kube_config()
+        await aio_config.load_kube_config()
 
-    return aio_client.CoreV1Api(), k8s_client.CoreV1Api()
+    return aio_client.CoreV1Api()
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +213,7 @@ async def find_target_pod(
 ) -> tuple:
     """Trouve le pod concerné par l'alerte.
 
-    Deux strategies, dans cet ordre :
+    Deux stratégies, dans cet ordre :
 
     1. **Le nom est connu.** L'annotation `pod_name` (ou le label `pod`)
        donne le nom exact. C'est le cas le plus précis et le plus rapide.
@@ -225,11 +222,11 @@ async def find_target_pod(
        agrégée par service, par exemple). On liste alors les pods du
        namespace et on filtre sur les labels de l'alerte. Le label
        `component` de nos règles vaut "demo-app", qui correspond au label
-       `app=demo-app` des pods. C'est un heuristic : si plusieurs pods
+       `app=demo-app` des pods. C'est une heuristique : si plusieurs pods
        correspondent, on prend le premier.
 
     Le cas 2 est ce qui rend l'agent **générique** : il ne dépend pas d'un
-    label maison et fonctionnent sur n'importe quel cluster.
+    label maison et fonctionne sur n'importe quel cluster.
 
     Le `namespace` est passé en paramètre et non lu depuis l'alerte : une
     alerte peut ne porter aucun label `namespace` (c'est le cas de la
@@ -274,7 +271,9 @@ async def find_target_pod(
     wanted = alert.labels.get("component")
     if wanted:
         for key in ("app", "app.kubernetes.io/name", "component"):
-            filtered = [p for p in candidates if p.metadata.labels.get(key) == wanted]
+            filtered = [
+                p for p in candidates if (p.metadata.labels or {}).get(key) == wanted
+            ]
             if filtered:
                 log.info(
                     "Pod déduit via label %s=%s dans %s : %d pod(s)",
@@ -433,7 +432,7 @@ async def collect_logs(core_v1: aio_client.CoreV1Api, pod, evidence: Evidence) -
 
     - les logs **courants** (du conteneur vivant) ;
     - les logs **précédents** (`previous=True`), c'est-à-dire ceux du
-      conteneur qui a MOURT. C'est la source la plus importante : elle
+      conteneur qui est MORT. C'est la source la plus importante : elle
       contient ce que l'application a écrit juste avant de mourir.
 
     Sur un OOMKill, les logs précédents sont **vides** : le noyau a tué le

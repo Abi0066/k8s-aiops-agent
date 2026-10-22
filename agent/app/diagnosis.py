@@ -95,7 +95,7 @@ def diagnose(
        comportement courant plutôt que la cause.
 
     On ne retourne `None` que si on n'a vraiment aucune information : dans
-    ce cas, l'agent laisse le LLM работа avec les preuves brutes, mais en
+    ce cas, l'agent laisse le LLM travailler avec les preuves brutes, mais en
     lui signalant explicitement qu'aucun verdict déterministe n'a pu être
     posé.
     """
@@ -106,7 +106,6 @@ def diagnose(
     exit_code = last_termination.get("exitCode")
     signal = last_termination.get("signal")
     restart_count = last_termination.get("restartCount")
-    message = last_termination.get("message")
 
     # --- Cas 1 : OOMKilled --------------------------------------------
     if reason == "OOMKilled":
@@ -125,9 +124,11 @@ def diagnose(
         )
 
     # --- Cas 2 : SIGKILL sans confirmation d'OOM ----------------------
-    # Kubernetes dit OOMKilled OU le conteneur a été tué par SIGKILL sans
-    # que le kernel confirme un dépassement mémoire.
-    if exit_code == EXIT_CODE_SIGKILL and reason != "Error":
+    # Le conteneur a été tué par SIGKILL sans que le kernel confirme un
+    # dépassement mémoire. Le runtime rapporte souvent `reason: Error`
+    # dans ce cas (ex. `kill -9`) : il ne faut PAS l'exclure, sinon le cas
+    # 3 le classerait à tort en « erreur applicative ».
+    if exit_code == EXIT_CODE_SIGKILL:
         return Verdict(
             code="SIGKILL",
             cause=(
@@ -143,35 +144,40 @@ def diagnose(
             confidence="medium",
         )
 
-    # --- Cas 3 : erreur applicative (exit code 1) --------------------
+    # --- Cas 3 : arrêt propre (SIGTERM ou sortie 0) ------------------
+    # Testé AVANT l'erreur applicative : un process qui ne gère pas
+    # SIGTERM sort avec 143 et le runtime peut rapporter `reason: Error`.
+    if exit_code in (0, EXIT_CODE_SIGTERM) or reason == "Completed":
+        return Verdict(
+            code="GracefulStop",
+            cause=(
+                f"Le conteneur s'est arrêté proprement (exit {exit_code}). "
+                "Il s'agit d'un arrêt demandé ou d'une fin normale, pas "
+                "d'une panne."
+            ),
+            evidence=f"reason={reason}, exitCode={exit_code}",
+            recommended_action=None,
+            confidence="high",
+        )
+
+    # --- Cas 4 : erreur applicative (code de sortie non nul) ---------
     # C'est le cas du scénario /crash : le process appelle os._exit(1).
-    # Kubernetes le signale `Reason: Error, Exit Code: 1`.
-    if reason == "Error" or (exit_code is not None and exit_code == 1):
+    # Kubernetes le signale `Reason: Error, Exit Code: 1`. Le code de
+    # sortie est repris tel quel : 1, 2, 127... ont des sens différents.
+    if reason == "Error" or exit_code is not None:
         return Verdict(
             code="ApplicationError",
             cause=(
                 "Le processus applicatif s'est terminé lui-même en erreur "
-                "(le conteneur a quitté avec le code 1). Ce n'est PAS un "
-                "dépassement mémoire : le kernel n'a pas tué le processus."
+                f"(le conteneur a quitté avec le code {exit_code}). Ce n'est "
+                "PAS un dépassement mémoire : le kernel n'a pas tué le "
+                "processus."
             ),
             evidence=f"reason={reason}, exitCode={exit_code}, signal={signal}",
             recommended_action=(
                 "Analyser les logs de l'application pour identifier l'erreur "
-                "qui a provoque la sortie du processus."
+                "qui a provoqué la sortie du processus."
             ),
-            confidence="high",
-        )
-
-    # --- Cas 4 : arrêt propre par SIGTERM ----------------------------
-    if exit_code == EXIT_CODE_SIGTERM or reason == "Completed":
-        return Verdict(
-            code="GracefulStop",
-            cause=(
-                "Le conteneur a été arrêté proprement (SIGTERM / exit 0-143). "
-                "Il s'agit d'un arrêt demandé, pas d'une panne."
-            ),
-            evidence=f"reason={reason}, exitCode={exit_code}",
-            recommended_action=None,
             confidence="high",
         )
 

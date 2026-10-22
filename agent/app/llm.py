@@ -14,7 +14,7 @@ code de collecte des preuves.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 log = logging.getLogger(__name__)
 
@@ -112,7 +112,7 @@ async def call_ollama(
       un diagnostic, la reproductibilité est une qualité : la même alerte
       doit produire la même analyse. À 0.7 (défaut), deux exécutions sur
       les mêmes preuves peuvent donner des conclusions différentes — donc
-      des-actions différentes en étape 4.
+      des actions différentes en étape 4.
 
     - **`num_ctx`** — taille de la fenêtre de contexte. 4096 tokens est la
       valeur par défaut de qwen2.5-coder:14b. Les preuves sont déjà tronquées en

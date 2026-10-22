@@ -1,0 +1,44 @@
+# CI de l'agent IA : lint + tests unitaires à chaque push et pull request.
+#
+# Les tests n'ont besoin d'aucun cluster : Kubernetes, Prometheus et
+# Ollama sont remplacés par de faux clients. La CI reste donc rapide
+# (< 1 min) et ne dépend d'aucun service externe.
+
+name: agent-ci
+
+on:
+  push:
+    branches: [main]
+    paths: ["agent/**", ".github/workflows/agent-ci.yml"]
+  pull_request:
+    paths: ["agent/**", ".github/workflows/agent-ci.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+
+      # Même version que l'image Docker (python:3.12-slim).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            agent/requirements.txt
+            agent/requirements-dev.txt
+
+      - name: Installer les dépendances
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Tests (pytest)
+        run: pytest -q
