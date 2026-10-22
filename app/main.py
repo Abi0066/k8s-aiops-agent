@@ -15,8 +15,9 @@ GET /crash    Simule un crash applicatif : le process se termine avec le
 GET /oom      Simule un dépassement de mémoire : on alloue plus que la
               memory limit du conteneur, le kernel OOM-kill le process. Le pod
               se termine alors avec la raison OOMKilled. C'est le scénario
-              d'incident que l'agent devra savoir reconnaître et corriger
-              (étape 4 : augmentation de la memory limit).
+              d'incident que l'agent sait reconnaître et corriger (étape 4 :
+              augmentation de la memory limit). Une fois la limite relevée,
+              la même requête aboutit.
 GET /metrics  Endpoint Prometheus. Expose les compteurs et histogrammes
               définis ci-dessous.
 """
@@ -44,6 +45,13 @@ logging.basicConfig(
 logger = logging.getLogger("demo-app")
 
 app = Flask(__name__)
+
+# Mémoire allouée par /oom, en Mio. Avec l'empreinte de base du process
+# (~40 Mio mesurés), le total fait ~160 Mio : AU-DESSUS de la limite de
+# 128Mi du manifest (OOMKill), EN DESSOUS des 192Mi qu'elle vaut après une
+# auto-guérison (x1,5). La même requête montre donc la panne, puis la
+# correction.
+OOM_ALLOC_MB = int(os.environ.get("OOM_ALLOC_MB", "120"))
 
 # ---------------------------------------------------------------------------
 # Métriques Prometheus
@@ -136,10 +144,15 @@ def crash():
 def oom():
     """Provoque un dépassement mémoire volontaire.
 
-    On alloue des blocs de mémoire jusqu'à dépasser la memory limit
+    On alloue `OOM_ALLOC_MB` Mio, de quoi dépasser la memory limit
     configurée sur le conteneur. Le noyau (kernel Linux) réagit en
     OOM-killing le process : le conteneur se termine alors avec la raison
     `OOMKilled`, visible dans `kubectl describe pod`.
+
+    La quantité est BORNÉE : une fois la limite relevée par l'auto-guérison
+    (étape 4), la même requête aboutit et répond 200. C'est ce qui permet de
+    vérifier la correction de bout en bout. Une allocation sans fin imiterait
+    une fuite mémoire, qu'aucune limite ne peut soigner.
 
     Point important pour la suite du projet : c'est le kernel qui tue le
     process, pas Python. Le signal SIGKILL n'est pas rattrapable — aucun
@@ -150,13 +163,13 @@ def oom():
     scénario intéressant.
     """
     REQUESTS.labels(endpoint="oom").inc()
-    logger.warning("OOM simulé sur /oom — allocation mémoire au-delà de la limite")
+    logger.warning("OOM simulé sur /oom — allocation de %d Mio", OOM_ALLOC_MB)
 
-    # On alloue par blocs de 8 Mo. La boucle continue tant qu'on n'a pas
-    # dépassé la limite : le noyau va tuer le process avant la fin.
+    # On alloue par blocs de 8 Mio. Si la limite est trop basse, le noyau
+    # tue le process avant la fin de la boucle.
     blocks = []
     try:
-        while True:
+        for _ in range(OOM_ALLOC_MB // 8):
             blocks.append(bytearray(8 * 1024 * 1024))
             time.sleep(0.05)
     except MemoryError:
@@ -164,6 +177,11 @@ def oom():
         # (cgroup avec limite stricte). On rend l'échec explicite.
         logger.error("MemoryError Python — la limite mémoire a été atteinte")
         return jsonify(status="oom-simulated", detail="MemoryError"), 500
+
+    # Arrivé ici, la limite suffisait. La mémoire est libérée avec la liste.
+    del blocks
+    logger.info("Allocation de %d Mio terminée : la limite mémoire suffit", OOM_ALLOC_MB)
+    return jsonify(status="ok", allocated_mb=OOM_ALLOC_MB)
 
 
 @app.route("/metrics")

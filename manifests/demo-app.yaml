@@ -39,7 +39,7 @@ spec:
           # imagePullPolicy: Never est indispensable : sans lui, le kubelet
           # tente de tirer l'image depuis un registre distant et échoue
           # (ErrImagePull) puisque l'image n'existe que localement.
-          image: localhost/demo-app:1.0.3
+          image: localhost/demo-app:1.0.4
           imagePullPolicy: Never
           ports:
             - name: http

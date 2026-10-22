@@ -76,7 +76,8 @@ case "$SCENARIO" in
         ;;
     oom)
         log "Scénario : OOMKill (le kernel tue le process pour dépassement mémoire)."
-        log "Attente de la réponse HTTP — elle sera coupée, c'est normal."
+        log "Attente de la réponse HTTP — coupée si la limite est trop basse."
+        # Après une auto-guérison (limite relevée), la même requête répond 200.
         curl -s -m 15 "$APP_URL/oom" || warn "  (connexion coupée : le process a bien été tué)"
         ;;
     *)

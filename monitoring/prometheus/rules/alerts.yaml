@@ -49,6 +49,41 @@ groups:
           pod_name: "{{ $labels.pod }}"
           namespace: "{{ $labels.namespace }}"
 
+      - alert: DemoAppOOMKilled
+        # Un seul OOMKill suffit : c'est l'incident que l'agent sait
+        # corriger (étape 4). Attendre la boucle de redémarrages de
+        # DemoAppCrashLooping retarderait la correction de plusieurs minutes.
+        #
+        # kube_pod_container_status_last_terminated_reason vaut 1 tant que
+        # le DERNIER arrêt du conteneur est un OOMKill, c'est-à-dire aussi
+        # longtemps que le pod existe. Seul, ce signal garderait l'alerte
+        # active des heures après un incident unique. Le « and » le limite
+        # aux conteneurs qui ont redémarré dans les 10 dernières minutes.
+        expr: |
+          kube_pod_container_status_last_terminated_reason{
+            namespace="aiops",
+            container="demo-app",
+            reason="OOMKilled"
+          } == 1
+          and on (namespace, pod, container)
+          increase(kube_pod_container_status_restarts_total{
+            namespace="aiops",
+            container="demo-app"
+          }[10m]) > 0
+        # Pas de « for » : un OOMKill est un fait établi par Kubernetes, pas
+        # une mesure qui fluctue. Il n'y a pas de bruit à filtrer.
+        for: 0m
+        labels:
+          severity: critical
+          component: demo-app
+        annotations:
+          summary: "L'application demo-app a été tuée par manque de mémoire"
+          description: >-
+            Le conteneur demo-app du pod {{ $labels.pod }} a dépassé sa limite
+            de mémoire et a été tué par le noyau (OOMKilled).
+          pod_name: "{{ $labels.pod }}"
+          namespace: "{{ $labels.namespace }}"
+
   # -------------------------------------------------------------------------
   # Groupe 2 : application injoignable
   # -------------------------------------------------------------------------

@@ -44,6 +44,42 @@ tests:
               pod_name: demo-app-7d4b9c-x2k8p
               namespace: aiops
 
+  # Un seul OOMKill déclenche l'alerte qui mène à l'auto-guérison. Elle doit
+  # nommer le pod (l'agent en déduit le Deployment à corriger), et retomber
+  # une fois l'incident passé, même si le pod garde son dernier arrêt OOMKilled.
+  - name: OOMKill unique -> alerte avec le nom du pod, puis retour au calme
+    interval: 15s
+    input_series:
+      # Le conteneur est tué à 1 min : son dernier arrêt devient OOMKilled
+      # et son compteur de redémarrages passe à 1, puis plus rien ne bouge.
+      - series: 'kube_pod_container_status_last_terminated_reason{namespace="aiops", pod="demo-app-7d4b9c-x2k8p", container="demo-app", reason="OOMKilled", job="kube-state-metrics"}'
+        values: '_x3 1x80'
+      - series: 'kube_pod_container_status_restarts_total{namespace="aiops", pod="demo-app-7d4b9c-x2k8p", container="demo-app", job="kube-state-metrics"}'
+        values: '0x3 1x80'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DemoAppOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: demo-app
+              namespace: aiops
+              pod: demo-app-7d4b9c-x2k8p
+              container: demo-app
+              reason: OOMKilled
+              job: kube-state-metrics
+            exp_annotations:
+              summary: "L'application demo-app a été tuée par manque de mémoire"
+              description: >-
+                Le conteneur demo-app du pod demo-app-7d4b9c-x2k8p a dépassé sa
+                limite de mémoire et a été tué par le noyau (OOMKilled).
+              pod_name: demo-app-7d4b9c-x2k8p
+              namespace: aiops
+      # 12 minutes après, aucun redémarrage récent : l'alerte est retombée.
+      - eval_time: 13m
+        alertname: DemoAppOOMKilled
+        exp_alerts: []
+
   # La latence élevée doit garder le namespace de l'application. La règle
   # d'inhibition d'Alertmanager (equal: namespace, pod) le compare à celui de
   # DemoAppDown : sans lui, l'alerte de latence n'est jamais masquée quand

@@ -12,8 +12,10 @@ des minutes — et l'astreinte nocturne, c'est une charge mentale supplémentair
 
 Ce projet automatise la partie *diagnostic* : un agent IA local reçoit les
 alertes, collecte les preuves (logs, événements, métriques, état du pod) et
-propose une cause racine. À l'étape 4, il pourra appliquer une correction
-automatiquement — en mode `dry-run` par défaut, jamais en écriture directe.
+propose une cause racine. Depuis l'étape 4, il corrige aussi lui-même
+l'incident qu'il sait trancher avec certitude (un conteneur tué pour
+dépassement de mémoire) — en mode `dry-run` par défaut, jamais en écriture
+directe sans décision humaine.
 
 ## Architecture
 
@@ -39,6 +41,7 @@ flowchart LR
     Agent -->|requêtes PromQL| Prom
     Agent -->|prompt + preuves| Ollama
     Ollama -->|cause racine| Agent
+    Agent -.->|OOMKill : limite mémoire relevée| App
     Grafana --> Prom
 ```
 
@@ -216,8 +219,9 @@ make validate     # toute l'infrastructure, voir ci-dessous
 
 Les tests de l'agent remplacent Kubernetes, Prometheus et Ollama par de faux
 clients. Ils figent en particulier les verdicts de `diagnosis.py` pour chaque
-combinaison `reason` / `exitCode`, l'échappement des requêtes PromQL et
-l'anti-doublon du webhook.
+combinaison `reason` / `exitCode`, l'échappement des requêtes PromQL,
+l'anti-doublon du webhook et chaque garde-fou de l'auto-guérison (un faux
+client enregistre les patchs que l'agent aurait envoyés).
 
 `make validate` (`scripts/validate.sh`) n'a besoin que de Podman ou Docker :
 chaque outil tourne dans un conteneur, à une version épinglée.
@@ -248,6 +252,7 @@ des deux images).
 │   │   ├── models.py     Modèles Pydantic du payload Alertmanager (v4)
 │   │   ├── collector.py  Collecte des preuves (API K8s + Prometheus)
 │   │   ├── diagnosis.py  Verdict déterministe (le code décide, le LLM explique)
+│   │   ├── remediation.py  Auto-guérison et ses garde-fous (étape 4)
 │   │   └── llm.py        Prompt de diagnostic + appel à Ollama
 │   ├── tests/            Tests unitaires pytest (sans cluster)
 │   ├── pyproject.toml    Configuration de pytest et ruff
@@ -283,7 +288,7 @@ des deux images).
 | 1 | Fondation : cluster kind, app de démo, Prometheus, Grafana | ✅ |
 | 2 | Détection : règles d'alerte + webhook | ✅ |
 | 3 | Agent IA : service FastAPI, collecte de preuves, LLM local | ✅ |
-| 4 | Action : auto-guérison avec mode dry-run par défaut | 🔜 |
+| 4 | Action : auto-guérison avec mode dry-run par défaut | ✅ |
 | 5 | GitOps : Flux synchronise le cluster depuis Git, CI GitHub Actions | ✅ |
 
 ## Choix techniques et justification
@@ -453,6 +458,20 @@ Un RBAC qui oublie `pods/log` donne une application qui démarre sans la
 moindre erreur et qui n'arrive pas à lire un seul log — un diagnostic
 aveugle, sans message d'erreur. C'est le piège classique du RBAC Kubernetes.
 
+Depuis l'étape 4, l'agent a **un seul** droit d'écriture, celui dont
+l'auto-guérison a besoin :
+
+```yaml
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceNames: ["demo-app"]
+  verbs: ["get", "patch"]
+```
+
+`patch` et pas `update` (qui réécrit l'objet entier), et seulement sur
+`demo-app` : l'agent ne peut modifier ni Ollama, ni Prometheus, ni son propre
+Deployment.
+
 ### Le code décide, le LLM explique
 
 C'est la leçon la plus importante de l'étape 3, et elle vient d'un échec.
@@ -491,6 +510,64 @@ action.
 du code, et ne laissez au modèle que ce qui relève du langage.* C'est ce
 qui rend le système fiable — la partie qui peut halluciner est cantonnée à
 la partie dont l'erreur n'a pas de conséquence opérationnelle.
+
+### L'auto-guérison : le code agit, le LLM raconte
+
+L'étape 4 pousse le principe précédent jusqu'à l'action. Quand le verdict
+déterministe est `OOMKilled` avec une confiance `high` (Kubernetes a écrit
+lui-même `reason: OOMKilled`), l'agent relève la limite de mémoire du
+conteneur dans le Deployment qui a créé le pod : 128Mi → 192Mi. Le
+LLM n'est consulté qu'**après**, pour expliquer l'action déjà décidée.
+Un `exitCode: 137` seul (confiance `medium`) ne déclenche rien : on ne
+relève pas une limite pour un incident qui n'est peut-être pas un manque
+de mémoire.
+
+Le chemin complet : `GET /oom` → OOMKill → alerte `DemoAppOOMKilled` (un
+seul OOMKill suffit) → webhook → verdict → patch → nouveau pod à 192Mi →
+la même requête `/oom` répond 200.
+
+| Garde-fou | Réglage | Pourquoi |
+|---|---|---|
+| Désactivée par défaut | `AUTOHEAL_ENABLED` (absent = `false`) | agir sur le cluster doit être demandé explicitement |
+| Dry-run par défaut | `AUTOHEAL_DRY_RUN` (absent = `true`) | le patch part avec `dryRun=All` : le serveur d'API le valide (RBAC, schéma, admission) sans rien enregistrer |
+| Plafond | `AUTOHEAL_MEMORY_MAX` (`512Mi` ici) | relever une limite ne soigne pas une fuite mémoire : la hausse s'arrête |
+| Une action par Deployment et par fenêtre | `AUTOHEAL_COOLDOWN_S` (`3600`) | un second OOMKill juste après la correction signale une fuite, pas une limite trop basse |
+| Le LLM ne décide rien | — | `remediation.py` ne lit que le verdict et l'état du cluster |
+| Tout est tracé | clé `remediation` d'`ANALYSIS_RESULT` | chaque décision est journalisée, y compris « ne rien faire » et pourquoi |
+
+Une valeur mal tapée reste du côté sûr : `AUTOHEAL_ENABLED=oui` n'active
+rien, `AUTOHEAL_DRY_RUN=flase` laisse le dry-run. Un facteur `<= 1` ou un
+plafond illisible fait échouer le démarrage de l'agent, pas le premier
+incident.
+
+Trois détails d'implémentation font la différence :
+
+- **Un patch « strategic merge ».** Le serveur fusionne la liste
+  `containers` par nom de conteneur. Un merge patch JSON classique
+  *remplacerait* la liste : le Deployment perdrait son image et ses sondes.
+- **Un verrou optimiste.** Le patch porte le `resourceVersion` lu juste
+  avant : si le Deployment a changé entre-temps (déploiement en cours, autre
+  analyse), le serveur répond 409 au lieu d'écraser la modification.
+- **Le délai est écrit sur le Deployment.** Les annotations
+  `aiops-agent/autoheal-at` et `aiops-agent/autoheal-memory` disent quand
+  et quoi : elles survivent au redémarrage de l'agent et se lisent avec
+  `kubectl describe`.
+
+Le manifest active l'action **en dry-run** : l'agent journalise ce qu'il
+aurait fait. Passer en mode réel est une décision humaine :
+
+```bash
+kubectl -n aiops set env deploy/aiops-agent AUTOHEAL_DRY_RUN=false
+make demo-oom
+kubectl -n aiops logs deploy/aiops-agent | grep ANALYSIS_RESULT | tail -1
+kubectl -n aiops get deploy demo-app -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}'
+```
+
+**Limite à connaître : la correction est un pansement.** Le prochain
+`kubectl apply -f manifests/` (ou une synchronisation GitOps) remet 128Mi,
+la valeur du dépôt. L'annotation `aiops-agent/autoheal-memory` est là pour
+qu'un humain reporte la nouvelle valeur dans le dépôt, ou corrige la
+consommation de l'application.
 
 ### L'alerte peut ne pas porter de namespace
 
