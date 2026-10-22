@@ -1,0 +1,14 @@
+# Namespace dédié au projet.
+#
+# Isoler l'application de démonstration, l'agent IA et le monitoring dans un
+# namespace propre a plusieurs effets :
+#   - les RBAC de l'agent sont limités à ce namespace (principe du moindre
+#     privilège) ;
+#   - `kubectl delete namespace aiops` nettoie tout d'un coup ;
+#   - les quotas de ressources peuvent être posés par namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops
+  labels:
+    app.kubernetes.io/part-of: k8s-aiops-agent

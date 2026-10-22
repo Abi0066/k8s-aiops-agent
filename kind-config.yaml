@@ -1,0 +1,55 @@
+# kind-config.yaml — Configuration du cluster Kubernetes local pour le projet
+# K8s AI Ops Agent.
+#
+# Le cluster `kind` ("Kubernetes IN Docker") fait tourner un nœud K8s complet
+# dans un conteneur : API server, etcd, scheduler, kube-proxy, CNI. On obtient
+# une API Kubernetes identique à celle d'EKS, ce qui rend le code de l'agent
+# portable entre local et AWS.
+#
+# Usage : kind create cluster --config kind-config.yaml
+#         kind delete cluster --name k8s-aiops
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+name: k8s-aiops
+
+# Bloc networking : c'est ici que kind expose les réglages réseau du cluster.
+#
+# apiServerPort : port explicite pour l'API server. 6443 (le défaut) peut
+# entrer en conflit si un autre cluster tourne en parallèle sur la machine ;
+# 8443 le rend prévisible.
+networking:
+  apiServerPort: 8443
+
+nodes:
+  - role: control-plane
+
+    # Exposition des applications vers l'hôte via NodePort.
+    # Le NodePort peut être choisi librement dans la plage 30000-32767, mais
+    # un choix explicite rend les URLs du README stables et prévisibles.
+    extraPortMappings:
+      # Application de démonstration (étape 1)
+      - containerPort: 30090
+        hostPort: 30090
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+
+      # Prometheus (étape 1)
+      - containerPort: 30093
+        hostPort: 30093
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+
+      # Grafana (étape 1)
+      - containerPort: 30094
+        hostPort: 30094
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+
+      # Service webhook de l'agent IA (étape 3) — réservé ici pour que le
+      # cluster soit déjà dimensionné pour les étapes suivantes.
+      - containerPort: 30095
+        hostPort: 30095
+        listenAddress: "127.0.0.1"
+        protocol: TCP

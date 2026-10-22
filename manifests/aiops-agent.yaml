@@ -1,0 +1,190 @@
+# Agent IA — ServiceAccount, RBAC, Deployment et Service.
+#
+# L'agent a besoin de trois choses :
+#   1. une identité (ServiceAccount) pour parler à l'API Kubernetes ;
+#   2. des droits (Role + RoleBinding) limités au namespace « aiops » ;
+#   3. une image à exécuter (Deployment) et une adresse stable (Service).
+#
+# Le Service est indispensable : c'est par son nom DNS interne
+# (aiops-agent.aiops.svc.cluster.local) qu'Alertmanager livrera le webhook.
+
+# ---------------------------------------------------------------------------
+# 1. ServiceAccount — l'identité de l'agent
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiops-agent
+  namespace: aiops
+  labels:
+    app: aiops-agent
+    app.kubernetes.io/part-of: k8s-aiops-agent
+---
+# ---------------------------------------------------------------------------
+# 2. Role — les droits, limités au namespace « aiops »
+# ---------------------------------------------------------------------------
+# Un Role (et non un ClusterRole) : les droits s'arrêtent au boundary du
+# namespace. Un agent de diagnostic n'a aucune raison de lire ce qui se
+# passe dans le reste du cluster — et encore moins les Secrets.
+#
+# Les trois ressources nécessaires :
+#   - pods          : lire l'état du pod (dernier arrêt, redémarrages)
+#   - events        : lire l'historique narratif du namespace
+#   - pods/log      : lire les logs (logs du conteneur ET du conteneur
+#                     précédent, via le paramètre previous=true)
+#
+# ATTENTION sur pods/log : c'est une SOUS-RESSOURCE. Elle ne fait pas
+# partie de l'objet Pod et doit être demandée explicitement. Un RBAC qui
+# l'oublie donne une application qui démarre sans erreur et qui n'arrive
+# pas à lire un seul log : le diagnostic devient aveugle sans le moindre
+# message d'erreur. C'est le piège classique du RBAC Kubernetes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aiops-agent
+  namespace: aiops
+  labels:
+    app: aiops-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+# ---------------------------------------------------------------------------
+# 3. RoleBinding — le lien entre l'identité et les droits
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aiops-agent
+  namespace: aiops
+  labels:
+    app: aiops-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aiops-agent
+subjects:
+  - kind: ServiceAccount
+    name: aiops-agent
+    namespace: aiops
+---
+# ---------------------------------------------------------------------------
+# 4. Deployment — l'agent lui-même
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-agent
+  namespace: aiops
+  labels:
+    app: aiops-agent
+    app.kubernetes.io/part-of: k8s-aiops-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiops-agent
+  template:
+    metadata:
+      labels:
+        app: aiops-agent
+    spec:
+      serviceAccountName: aiops-agent
+      # automountServiceAccountToken: true est le comportement par
+      # défaut depuis Kubernetes 1.24 — le token est monté dans le pod.
+      # On le déclare explicitement pour que le lien soit visible.
+      automountServiceAccountToken: true
+      containers:
+        - name: aiops-agent
+          image: localhost/aiops-agent:1.0.0
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Adresse d'Ollama : nom DNS interne du Service Kubernetes.
+            # Jamais une IP en dur : le Service assure le load-balancing
+            # et l'adresse peut changer si le Service est recréé.
+            - name: OLLAMA_URL
+              value: "http://ollama.aiops.svc.cluster.local:11434"
+            - name: PROMETHEUS_URL
+              value: "http://prometheus.aiops.svc.cluster.local:9090"
+            - name: OLLAMA_MODEL
+              value: "qwen2.5-coder:14b"
+            - name: WATCHED_NAMESPACE
+              value: "aiops"
+            # Timeout de l'appel au LLM : long, car un modèle 3B sur CPU
+            # peut prendre 30 à 90 secondes (surtout la première fois,
+            # où le modèle doit être chargé en mémoire).
+            - name: LLM_TIMEOUT
+              value: "300"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          # La sonde de VIVACITÉ (/live) : vérifie que le PROCESS de
+          # l'agent tourne. C'est la seule chose qu'un redémarrage de pod
+          # pourrait réparer.
+          #
+          # Elle ne doit PAS dépendre d'Ollama ni de Prometheus. Si elle
+          # l'on faisait, une panne d'Ollama redémarrerait l'agent en
+          # boucle — sans rien réparer, puisque le redémarrage ne ferait
+          # pas revenir Ollama. C'est exactement le défaut qu'on a observé
+          # pendant le développement : l'agent redémarrait toutes les 30 s
+          # parce qu'Ollama n'était pas encore prêt.
+          #
+          # La règle : « la vivacité dépend de ce que je contrôle, la
+          # disponibilité dépend de ce que je consomme ».
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # La sonde de DISPONIBILITÉ (/ready) : vérifie que l'agent peut
+          # réellement faire son travail, donc que ses dépendances
+          # (Ollama, Prometheus, API Kubernetes) répondent.
+          #
+          # Si Ollama tombe, le pod sort du Service : il ne reçoit plus de
+          # webhook, mais il n'est pas redémarré pour rien. Kubernetes
+          # attend que la sonde redevienne verte pour le réinscrire dans
+          # le Service.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 2
+---
+# ---------------------------------------------------------------------------
+# 5. Service — l'adresse stable du webhook
+# ---------------------------------------------------------------------------
+# ClusterIP : le Service n'est accessible que depuis l'intérieur du
+# cluster. C'est ce qu'il faut — l'agent n'a pas vocation à être exposé
+# sur l'hôte.
+#
+# Le port 8080 correspond au containerPort de l'agent. Alertmanager
+# livrera le webhook sur http://aiops-agent.aiops.svc.cluster.local:8080/webhook
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-agent
+  namespace: aiops
+  labels:
+    app: aiops-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: aiops-agent
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

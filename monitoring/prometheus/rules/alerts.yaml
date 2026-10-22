@@ -1,0 +1,96 @@
+# Règles d'alerte — format Prometheus natif (groups:).
+#
+# Pas de CRD PrometheusRule : ce fichier est directement consommé par
+# Prometheus via la directive `rule_files` de sa configuration. Il n'y a donc
+# aucune dépendance au Prometheus Operator — tout est lisible dans Git.
+#
+# Chaque règle a trois éléments :
+#   alert      : le NOM de l'alerte. C'est ce nom que l'agent IA recevra dans
+#                le webhook et qui lui permettra de reconnaître le type
+#                d'incident. Il doit être stable et explicite.
+#   expr       : l'expression PromQL qui décide si l'alerte se déclenche.
+#   for        : la durée pendant laquelle la condition doit rester vraie
+#                AVANT que l'alerte ne parte. Un "for" évite le bruit : une
+#                latence ponctuelle ne déclenche pas une alerte.
+#
+# Les annotations sont transmises dans le payload du webhook. Ce sont elles
+# que l'agent lira pour savoir QUOI il doit diagnostiquer et où.
+
+groups:
+  # -------------------------------------------------------------------------
+  # Groupe 1 : application en crash
+  # -------------------------------------------------------------------------
+  - name: demo-app-availability
+    rules:
+      - alert: DemoAppCrashLooping
+        # kube_pod_container_status_restarts_total compte les redémarrages
+        # par conteneur. On ne s'intéresse qu'à l'application de démo.
+        #
+        # Le "increase(...[5m]) > 3" compte les redémarrages sur les 5 dernières
+        # minutes : c'est la signature d'un CrashLoopBackOff (le pod redémarre
+        # en boucle avec un back-off exponentiel de 10s, 20s, 40s...).
+        expr: |
+          increase(kube_pod_container_status_restarts_total{
+            namespace="aiops",
+            container="demo-app"
+          }[5m]) > 3
+        for: 1m
+        labels:
+          severity: critical
+          component: demo-app
+        annotations:
+          summary: "L'application demo-app redémarre en boucle"
+          description: >-
+            Le conteneur demo-app dans le namespace aiops a redémarré plus de
+            3 fois en 5 minutes. Suspect : CrashLoopBackOff.
+          # Le nom du pod est dynamique (suffixé d'un hash par le ReplicaSet).
+          # On l'extrait de l'étiquette de la série pour que l'agent sache
+          # quel pod inspecter.
+          pod_name: "{{ $labels.pod }}"
+          namespace: "{{ $labels.namespace }}"
+
+  # -------------------------------------------------------------------------
+  # Groupe 2 : application injoignable
+  # -------------------------------------------------------------------------
+  - name: demo-app-health
+    rules:
+      - alert: DemoAppDown
+        # up == 0 signifie que le scrape a échoué : le pod n'expose pas
+        # /metrics. C'est le symptôme "l'app ne répond plus".
+        expr: |
+          up{job="demo-app"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: demo-app
+        annotations:
+          summary: "L'application demo-app ne répond plus"
+          description: >-
+            Prometheus n'arrive plus à scraper l'application demo-app depuis
+            au moins 2 minutes. Le pod est probablement mort ou en boucle de
+            redémarrage.
+
+  # -------------------------------------------------------------------------
+  # Groupe 3 : latence anormale
+  # -------------------------------------------------------------------------
+  - name: demo-app-latency
+    rules:
+      - alert: DemoAppHighLatency
+        # histogram_quantile(0.95, ...) calcule le 95e centile de la latence
+        # à partir de l'histogramme demo_app_request_duration_seconds.
+        # On ne prend en compte que le bucket "le" (less-or-equal) pour que
+        # le calcul du quantile soit correct.
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(demo_app_request_duration_seconds_bucket{job="demo-app"}[5m]))
+          ) > 0.5
+        for: 3m
+        labels:
+          severity: warning
+          component: demo-app
+        annotations:
+          summary: "Latence élevée sur demo-app"
+          description: >-
+            Le 95e centile de latence de demo-app dépasse 500 ms depuis plus
+            de 3 minutes. Suspect : saturation CPU ou contention mémoire.

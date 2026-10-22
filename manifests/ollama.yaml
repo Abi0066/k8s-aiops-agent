@@ -1,0 +1,164 @@
+# Ollama — le serveur de modèles de langage local, dans le cluster.
+#
+# Pourquoi Ollama est-il dans le cluster et pas sur la machine hôte ?
+#
+# L'agent est un pod. Il ne peut joindre que ce qui est joignable depuis
+# le réseau du cluster. Ollama installé sur la machine hôte n'écoute que
+# sur 127.0.0.1 (c'est son comportement par défaut) : le pod ne pourrait
+# pas l'atteindre.
+#
+# Le coût de l'option (a) : ~3.4 Go d'image + 9 Go de modèle, et
+# ~20 Go de RAM pour l'inférence.
+
+# ---------------------------------------------------------------------------
+# 1. PersistentVolumeClaim — le disque qui abrite le modèle
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-models
+  namespace: aiops
+  labels:
+    app: ollama
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 15Gi
+---
+# ---------------------------------------------------------------------------
+# 2. Deployment Ollama
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: aiops
+  labels:
+    app: ollama
+    app.kubernetes.io/part-of: k8s-aiops-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      # --- initContainer : télécharge le modèle -------------------------
+      initContainers:
+        - name: pull-model
+          image: docker.io/ollama/ollama:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "=== Téléchargement du modèle qwen2.5-coder:14b dans le PVC ==="
+              export OLLAMA_MODELS=/models
+              echo "OLLAMA_MODELS=${OLLAMA_MODELS}"
+              /bin/ollama serve > /tmp/ollama.log 2>&1 &
+              OLLAMA_PID=$!
+              echo "Serveur Ollama lancé (PID ${OLLAMA_PID})"
+              for i in $(seq 1 30); do
+                if /bin/ollama list > /dev/null 2>&1; then
+                  echo "Serveur prêt après ${i}s."
+                  break
+                fi
+                if [ "$i" -eq 30 ]; then
+                  echo "ERREUR : le serveur Ollama n'a pas démarré." >&2
+                  cat /tmp/ollama.log >&2
+                  exit 1
+                fi
+                sleep 1
+              done
+              /bin/ollama pull qwen2.5-coder:14b
+              echo "=== Modèles disponibles ==="
+              /bin/ollama list
+              kill "${OLLAMA_PID}" 2>/dev/null || true
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+      # --- conteneur principal ------------------------------------------
+      containers:
+        - name: ollama
+          image: docker.io/ollama/ollama:latest
+          imagePullPolicy: IfNotPresent
+          args: ["serve"]
+          env:
+            - name: OLLAMA_MODELS
+              value: "/models"
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:11434"
+            - name: OLLAMA_VULKAN
+              value: "1"
+            - name: OLLAMA_CONTEXT_LENGTH
+              value: "4096"
+          ports:
+            - name: http
+              containerPort: 11434
+          volumeMounts:
+            - name: models
+              mountPath: /models
+            - name: dri
+              mountPath: /dev/dri
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "500m"
+            limits:
+              memory: "20Gi"
+              cpu: "4000m"
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: ollama-models
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+---
+# ---------------------------------------------------------------------------
+# 3. Service Ollama
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: aiops
+  labels:
+    app: ollama
+spec:
+  type: ClusterIP
+  selector:
+    app: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: http

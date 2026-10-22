@@ -1,0 +1,22 @@
+# Tableau de bord Grafana — provisionné automatiquement.
+#
+# Ce fichier ne contient QUE les métadonnées de la ConfigMap. Le contenu
+# réel est dans monitoring/grafana/dashboards/ :
+#
+#   provider.yaml  -> clé "dashboard.yaml" : indique à Grafana où chercher
+#                     les dashboards (le dossier, et comment les charger)
+#   demo-app.json  -> clé "demo-app.json"  : le tableau de bord lui-même
+#
+# Pourquoi deux fichiers plutôt qu'un seul ? Parce que le format d'un dashboard
+# Grafana est du JSON : le garder dans un .json permet à l'éditeur de le
+# formater, de le relire, et de le réexporter depuis l'interface Grafana sans
+# le noyer dans du YAML.
+#
+# Les ConfigMaps Grafana sont générées par scripts/cluster-up.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: aiops
+  labels:
+    app.kubernetes.io/name: grafana

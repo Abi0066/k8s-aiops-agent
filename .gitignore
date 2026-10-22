@@ -1,0 +1,37 @@
+# Fichiers générés par Terraform
+terraform/**/.terraform/
+terraform/**/*.tfstate
+terraform/**/*.tfstate.*
+terraform/**/.terraform.lock.hcl
+*.tfvars
+!example.tfvars
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Fichiers de travail locaux
+*.tar
+*.log
+.env
+
+# Notes de progression du mode apprentissage (local, non versionné)
+.vibe-wise/
+
+# Éditeurs
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Claude Code local skills
+.claude/
+
+# Fichiers temporaires
+PID
+*.pid

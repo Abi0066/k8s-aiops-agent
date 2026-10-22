@@ -1,0 +1,17 @@
+# Dépendances de l'agent IA.
+#
+# Versions épinglées : le build doit être reproductible. Un tag flottant
+# (fastapi sans version) pourrait casser le conteneur du jour au lendemain,
+# sans que rien ne change dans le dépôt.
+#
+# fastapi      : le framework web (routes, validation, documentation auto).
+# uvicorn      : le serveur ASGI qui exécute l'application FastAPI.
+# httpx        : client HTTP asynchrone (Prometheus, Ollama).
+# kubernetes   : client officiel de l'API Kubernetes (version Async).
+# pydantic     : modèles de validation du payload Alertmanager.
+
+fastapi==0.159.1
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+kubernetes==37.0.1
+pydantic==2.14.1

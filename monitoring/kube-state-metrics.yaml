@@ -1,0 +1,167 @@
+# kube-state-metrics — exposition de l'état des objets Kubernetes en métriques.
+#
+# Pourquoi ce composant ?
+# -------------------
+# Le kubelet expose des métriques sur son activité (CPU, mémoire, trafic), mais
+# PAS l'historique métier des objets : combien de fois un conteneur a
+# redémarré, pour quelle raison le pod s'est arrêté, quel était le dernier code
+# de sortie.
+#
+# kube-state-metrics (KSM) parcourt l'API Kubernetes et publie cet état sous
+# forme de métriques. C'est la source de :
+#   - kube_pod_container_status_restarts_total  (règle DemoAppCrashLooping)
+#   - kube_pod_container_status_last_terminated_reason (détection OOMKilled)
+#   - kube_pod_status_phase, kube_pod_status_ready, ...
+#
+# Sans KSM, l'agent IA de l'étape 3 ne pourrait pas distinguer "le pod a crashé"
+# de "le pod a été OOM-killé" en lisant les métriques : il devrait interroger
+# l'API Kubernetes à chaque incident (plus lent, plus fragile).
+#
+# Nous ne l'installons pas via Helm (choix du projet : tout est en YAML versionné)
+# mais via les manifests upstream, dont on ne garde ici que l'essentiel :
+# un Deployment, un Service et les RBAC minimaux.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: aiops
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+---
+# RBAC : kube-state-metrics a besoin de LIRE l'état des objets. Il n'écrit
+# jamais. Le ClusterRole est en lecture seule sur les ressources listées.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-state-metrics
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+rules:
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - endpoints
+      - limitranges
+      - namespaces
+      - nodes
+      - persistentvolumeclaims
+      - persistentvolumes
+      - pods
+      - replicationcontrollers
+      - resourcequotas
+      - secrets
+      - services
+    verbs: ["list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - daemonsets
+      - deployments
+      - replicasets
+      - statefulsets
+    verbs: ["list", "watch"]
+  - apiGroups: ["batch"]
+    resources:
+      - cronjobs
+      - jobs
+    verbs: ["list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: ["list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - storageclasses
+      - volumeattachments
+    verbs: ["list", "watch"]
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-state-metrics
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: kube-state-metrics
+    namespace: aiops
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: aiops
+  labels:
+    app: kube-state-metrics
+    app.kubernetes.io/name: kube-state-metrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kube-state-metrics
+  template:
+    metadata:
+      labels:
+        app: kube-state-metrics
+    spec:
+      serviceAccountName: kube-state-metrics
+      containers:
+        - name: kube-state-metrics
+          # Version épinglée. Le digest est omis ici pour la lisibilité, mais
+          # un vrai déploiement devrait le figer (voir l'étape 5 / Trivy).
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.17.0
+          # L'image est chargée dans le nœud par `make build` (kind load).
+          # Sans ce Never, le kubelet tenterait de la tirer depuis le registre
+          # distant — ce qui marcherait aussi, mais slower et dependent du réseau.
+          # Never est le bon choix pour un cluster local hors ligne.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "20m"
+            limits:
+              memory: "256Mi"
+              cpu: "100m"
+          # --telemetry-port: on le désactive, on n'en a pas besoin et cela
+          # ouvre un port inutile dans le pod.
+          args:
+            - --telemetry-port=0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: aiops
+  labels:
+    app: kube-state-metrics
+spec:
+  type: ClusterIP
+  selector:
+    app: kube-state-metrics
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
