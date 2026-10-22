@@ -10,6 +10,8 @@
 # soit utilisable sur une machine Fedora comme sur une Ubuntu, sans sudo.
 #
 set -euo pipefail
+# shellcheck source=scripts/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -18,19 +20,42 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 KIND_VERSION="v0.33.0"
 KUBECTL_VERSION="v1.37.1"
 
-log()  { printf '\033[0;36m[setup]\033[0m %s\n' "$*"; }
-warn() { printf '\033[0;33m[setup]\033[0m %s\n' "$*"; }
-die()  { printf '\033[0;31m[setup]\033[0m %s\n' "$*" >&2; exit 1; }
+# kind et kubectl sont publiés pour amd64 et arm64 (ex. une VM Linux sur un
+# Mac Apple Silicon) : on prend le binaire de l'architecture de la machine.
+case "$(uname -m)" in
+    x86_64)        ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *)             die "Architecture non supportée : $(uname -m)" ;;
+esac
+
+# Télécharge un binaire, vérifie son empreinte SHA-256 publiée, puis
+# l'installe. Le fichier n'arrive dans $INSTALL_DIR qu'une fois vérifié : un
+# téléchargement interrompu ou altéré ne remplace jamais un binaire valide.
+#
+# Usage : install_binary <nom> <url du binaire> <url de l'empreinte>
+install_binary() {
+    local name="$1" url="$2" sha_url="$3" tmp expected
+    tmp="$(mktemp)"
+    curl -fsSL --retry 3 -o "$tmp" "$url"
+    # Le fichier d'empreinte contient le hash, suivi du nom du fichier chez
+    # kind, seul chez kubectl : on ne garde que le premier champ.
+    expected="$(curl -fsSL --retry 3 "$sha_url" | awk '{ print $1 }')"
+    if ! echo "${expected}  ${tmp}" | sha256sum --check --status; then
+        rm -f -- "$tmp"
+        die "Empreinte SHA-256 invalide pour $name ($url)."
+    fi
+    install -m 0755 "$tmp" "$INSTALL_DIR/$name"
+    rm -f -- "$tmp"
+}
 
 install_kind() {
     if [[ -x "$INSTALL_DIR/kind" ]] && "$INSTALL_DIR/kind" version | grep -q "$KIND_VERSION"; then
         log "kind $KIND_VERSION déjà installé."
         return
     fi
-    log "Téléchargement de kind $KIND_VERSION..."
-    curl -fsSL --retry 3 -o "$INSTALL_DIR/kind" \
-        "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
-    chmod +x "$INSTALL_DIR/kind"
+    log "Téléchargement de kind $KIND_VERSION ($ARCH)..."
+    local url="https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${ARCH}"
+    install_binary kind "$url" "${url}.sha256sum"
     log "kind $KIND_VERSION installé dans $INSTALL_DIR"
 }
 
@@ -39,31 +64,20 @@ install_kubectl() {
         log "kubectl $KUBECTL_VERSION déjà installé."
         return
     fi
-    log "Téléchargement de kubectl $KUBECTL_VERSION..."
-    curl -fsSL --retry 3 -o "$INSTALL_DIR/kubectl" \
-        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-    chmod +x "$INSTALL_DIR/kubectl"
+    log "Téléchargement de kubectl $KUBECTL_VERSION ($ARCH)..."
+    local url="https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+    install_binary kubectl "$url" "${url}.sha256"
     log "kubectl $KUBECTL_VERSION installé dans $INSTALL_DIR"
-}
-
-# kind 0.33 exige Podman >= 3.0 ou Docker >= 20.10. On détecte ce qui est présent
-# et on exporte KIND_EXPERIMENTAL_PROVIDER pour que kind pilote le bon runtime.
-detect_container_runtime() {
-    if command -v podman >/dev/null 2>&1; then
-        export KIND_EXPERIMENTAL_PROVIDER=podman
-        log "Runtime détecté : podman ($(podman --version)). KIND_EXPERIMENTAL_PROVIDER=podman"
-    elif command -v docker >/dev/null 2>&1; then
-        log "Runtime détecté : docker."
-    else
-        die "Aucun runtime de conteneurs trouvé (podman ou docker requis pour kind)."
-    fi
 }
 
 main() {
     mkdir -p "$INSTALL_DIR"
     install_kind
     install_kubectl
-    detect_container_runtime
+
+    # kind 0.33 exige Podman >= 3.0 ou Docker >= 20.10.
+    detect_runtime
+    log "Runtime détecté : $("$RUNTIME" --version)"
 
     # Vérifie que br_netfilter est chargé : sans lui, le réseau interne de
     # Kubernetes (DNS interne, routage des Service) ne fonctionne pas.

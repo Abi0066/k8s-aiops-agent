@@ -1,48 +1,33 @@
 #!/usr/bin/env bash
 #
-# cluster-up.sh — Crée le cluster kind et y déploie l'étape 1 du projet.
+# cluster-up.sh — Crée le cluster kind et y déploie le projet (étapes 1 à 3).
 #
-# Le script est idempotent : on peut le relancer sans risque, meme si le
-# cluster existe deja. Il se contente de re-appliquer les manifests.
+# Le script est idempotent : on peut le relancer sans risque, même si le
+# cluster existe déjà. Il se contente alors de réappliquer les manifests.
 
 set -euo pipefail
-
-CLUSTER_NAME="k8s-aiops"
-NAMESPACE="aiops"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"
 
-log()  { printf '\033[0;36m[cluster-up]\033[0m %s\n' "$*"; }
-warn() { printf '\033[0;33m[cluster-up]\033[0m %s\n' "$*"; }
-die()  { printf '\033[0;31m[cluster-up]\033[0m %s\n' "$*" >&2; exit 1; }
-
 # ---------------------------------------------------------------------------
-# 1. Runtime de conteneurs
+# 1. Runtime de conteneurs et images
 # ---------------------------------------------------------------------------
-if command -v podman >/dev/null 2>&1; then
-    export KIND_EXPERIMENTAL_PROVIDER=podman
-    log "Runtime : podman."
-elif command -v docker >/dev/null 2>&1; then
-    log "Runtime : docker."
-else
-    die "Aucun runtime de conteneurs (podman ou docker) trouvé."
-fi
+detect_runtime
+log "Runtime : $RUNTIME."
 
-# kind load docker-image appelle « docker » en dur dans son code source.
-# Sur une machine où seul podman est installé, on installe un shim qui
-# délègue les commandes docker à podman. Voir scripts/docker-podman-shim.sh.
-if command -v podman >/dev/null 2>&1 && ! command -v docker >/dev/null 2>&1; then
-    SHIM_DIR="${HOME}/.local/bin"
-    mkdir -p "$SHIM_DIR"
-    cp "$REPO_ROOT/scripts/docker-podman-shim.sh" "$SHIM_DIR/docker"
-    chmod +x "$SHIM_DIR/docker"
-    log "Shim docker->podman installé dans $SHIM_DIR/docker"
-fi
+# demo-app et l'agent sont en imagePullPolicy: Never : sans leur image dans le
+# nœud, leurs pods resteraient en ErrImageNeverPull. On vérifie qu'elles sont
+# construites AVANT de créer le cluster, pour échouer tôt et proprement.
+for image in "$DEMO_APP_IMAGE" "$AGENT_IMAGE"; do
+    "$RUNTIME" image inspect "$image" >/dev/null 2>&1 \
+        || die "Image $image introuvable : lancez d'abord 'make build'."
+done
 
 # ---------------------------------------------------------------------------
 # 2. Création du cluster
 # ---------------------------------------------------------------------------
-if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
+if cluster_exists; then
     log "Le cluster '$CLUSTER_NAME' existe déjà."
 else
     log "Création du cluster '$CLUSTER_NAME'..."
@@ -51,6 +36,18 @@ fi
 
 # Le contexte kubectl doit pointer sur notre cluster.
 kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
+
+# Chargement des images dans le nœud. Les images publiques que l'hôte n'a
+# pas encore (make build ne les a pas tirées) seront tirées par le kubelet.
+log "Chargement des images dans le nœud..."
+load_image "$DEMO_APP_IMAGE"
+load_image "$AGENT_IMAGE"
+mapfile -t THIRD_PARTY_IMAGES < <(third_party_images)
+for image in "${THIRD_PARTY_IMAGES[@]}"; do
+    if "$RUNTIME" image inspect "$image" >/dev/null 2>&1; then
+        load_image "$image"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # 3. Namespace
@@ -100,14 +97,14 @@ kubectl apply -f manifests/demo-app.yaml
 log "Déploiement de kube-state-metrics..."
 kubectl apply -f monitoring/kube-state-metrics.yaml
 
-log "Déploiement de Prometheus..."
-kubectl apply -f monitoring/prometheus/prometheus.yaml
-
 # Alertmanager est déployé AVANT Prometheus : Prometheus a besoin de le joindre
 # pour publier ses alertes. L'ordre inverse est sans conséquence pratique
 # (Prometheus réessaie), mais cet ordre reflète la dépendance réelle.
 log "Déploiement d'Alertmanager..."
 kubectl apply -f monitoring/alertmanager/alertmanager-deployment.yaml
+
+log "Déploiement de Prometheus..."
+kubectl apply -f monitoring/prometheus/prometheus.yaml
 
 log "Déploiement de Grafana..."
 kubectl apply -f monitoring/grafana/grafana.yaml
@@ -139,7 +136,8 @@ if ! kubectl wait --for=condition=Ready pod \
         --timeout=600s 2>/dev/null; then
     warn "Tous les pods ne sont pas Ready. État actuel :"
     kubectl get pods --namespace="$NAMESPACE"
-    warn "Les images locales doivent avoir été chargées : make build"
+    warn "Au premier démarrage, Ollama télécharge encore son modèle :"
+    warn "    kubectl -n $NAMESPACE logs deploy/ollama -c pull-model -f"
 fi
 
 echo
