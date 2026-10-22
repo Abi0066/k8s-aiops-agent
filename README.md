@@ -81,6 +81,7 @@ sequenceDiagram
 |---|---|---|
 | Podman **ou** Docker | Podman 3.0+ / Docker 20.10+ | Runtime de conteneurs pour `kind` |
 | `br_netfilter` | noyau | Fait passer le trafic des pods dans iptables. Sans lui, le réseau interne K8s est cassé |
+| Instances inotify | noyau, 512 au moins | containerd en ouvre une par conteneur pour être prévenu des OOMKill. À 128, la valeur par défaut, il n'y arrive plus : un pod tué par manque de mémoire apparaît `Error` au lieu de `OOMKilled` et l'auto-guérison ne se déclenche pas |
 | `make` | — | Point d'entrée des scripts |
 | Python | 3.12 | Facultatif : tests et lint en local (`make test lint`) |
 | RAM libre | ~12 Go | Ollama charge un modèle de 14 milliards de paramètres |
@@ -90,6 +91,8 @@ Sur Fedora :
 ```bash
 sudo modprobe br_netfilter
 echo br_netfilter | sudo tee /etc/modules-load.d/k8s.conf
+sudo sysctl -w fs.inotify.max_user_instances=512
+echo fs.inotify.max_user_instances=512 | sudo tee /etc/sysctl.d/99-kind.conf
 systemctl --user enable --now podman.socket
 ```
 
@@ -568,6 +571,15 @@ kubectl -n aiops get deploy demo-app -o jsonpath='{.spec.template.spec.container
 la valeur du dépôt. L'annotation `aiops-agent/autoheal-memory` est là pour
 qu'un humain reporte la nouvelle valeur dans le dépôt, ou corrige la
 consommation de l'application.
+
+**Si rien ne se passe sur kind.** Le pod tué affiche `reason: Error`
+(code 137) au lieu de `OOMKilled` : containerd n'a pas pu surveiller les
+OOMKill, faute d'instances inotify (voir les prérequis). Son journal le dit :
+`podman exec k8s-aiops-control-plane journalctl -u containerd | grep "oom events"`.
+Le verdict n'est alors qu'un SIGKILL de confiance moyenne et l'agent, à
+raison, ne touche à rien. Après avoir relevé la limite, recréer le pod
+(`kubectl -n aiops rollout restart deploy/demo-app`) : la surveillance
+s'installe au démarrage du conteneur.
 
 ### L'alerte peut ne pas porter de namespace
 
