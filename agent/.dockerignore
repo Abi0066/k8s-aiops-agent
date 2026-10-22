@@ -1,0 +1,12 @@
+# Fichiers exclus du contexte de construction de l'image.
+#
+# Le Dockerfile ne copie que requirements.txt et app/ : les tests et les
+# caches des outils n'ont rien à faire dans le contexte. Surtout, le
+# bytecode compilé en local (__pycache__) ne doit pas suivre `COPY app/` :
+# il viendrait d'un autre Python que celui de l'image.
+**/__pycache__
+**/*.py[cod]
+tests/
+.pytest_cache/
+.ruff_cache/
+.venv/

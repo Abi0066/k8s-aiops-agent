@@ -71,7 +71,7 @@ class Verdict:
 #   1   = le process a quitté lui-même avec une erreur
 #
 # La règle « 137 = OOMKilled » est une CONVENTION, pas une garantie : un
-# SIGKILL peut aussi venir d'un `kill -9` ou d'un éviction. On ne peut
+# SIGKILL peut aussi venir d'un `kill -9` ou d'une éviction. On ne peut
 # l'affirmer que si Kubernetes confirme `reason: OOMKilled`.
 EXIT_CODE_SIGKILL = 137
 EXIT_CODE_SIGTERM = 143
@@ -237,8 +237,8 @@ def format_verdict_for_prompt(verdict: Optional[Verdict]) -> str:
     """Présente le verdict au LLM, sous une forme contraignante.
 
     Le LLM reçoit le verdict ET l'interdiction de le contredire. Sans
-    cette consigne, un modèle à 3 milliards de paramètres a une forte
-    tendance à « améliorer » la réponse — et à se tromper.
+    cette consigne, un petit modèle local a une forte tendance à
+    « améliorer » la réponse — et à se tromper.
     """
     if verdict is None:
         return (

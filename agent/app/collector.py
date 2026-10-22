@@ -2,9 +2,8 @@
 
 Ce module rassemble les informations brutes. Il ne contient AUCUNE
 intelligence : aucun jugement sur la cause, aucun seuil, aucune interprétation.
-Son unique
-rôle est de ramener des faits vérifiables, que le module `llm` transformera
-ensuite en diagnostic.
+Son unique rôle est de ramener des faits vérifiables, que les modules
+`diagnosis` et `llm` transformeront ensuite en diagnostic.
 
 Cette séparation a une raison pédagogique : on peut lire `collector.py`
 pour savoir exactement quelles preuves sont disponibles, sans être distrait
@@ -12,9 +11,9 @@ par la logique d'analyse.
 
 Deux sources de preuves :
 
-  - l'API Kubernetes : l'état du pod, ses logs, les événements du namespace ;
+  - l'API Kubernetes : l'état du pod, ses logs, ses événements ;
   - l'API Prometheus : l'historique chiffré (redémarrages, raison du dernier
-    arrêt, consommation mémoire/CPU).
+    arrêt, consommation mémoire).
 
 Ces deux sources sont complémentaires. Le pod dit CE QUI S'EST PASSÉ
 ("terminé avec le code 137"), Prometheus dit COMBIEN DE TEMPS et AVEC QUELLE
@@ -23,9 +22,11 @@ CONSOMMATION. L'agent a besoin des deux.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from kubernetes.aio import client as aio_client
 from kubernetes.aio import config as aio_config
@@ -51,6 +52,14 @@ log = logging.getLogger(__name__)
 MAX_LOG_LINES = 50
 MAX_EVENTS = 15
 MAX_PROMETHEUS_SERIES = 10
+
+# Délai maximal d'un appel à Prometheus ou à l'API Kubernetes, en secondes.
+#
+# Le client HTTP partagé est créé SANS timeout (l'appel au LLM peut durer
+# plusieurs minutes, voir main.py). Sans cette borne, un Prometheus figé
+# bloquerait l'analyse indéfiniment au lieu de la laisser continuer avec
+# une preuve en moins.
+API_TIMEOUT_S = 10.0
 
 
 @dataclass
@@ -79,7 +88,8 @@ class Evidence:
     logs: str = ""
     previous_logs: str = ""
 
-    # Événements du namespace, du plus récent au plus ancien.
+    # Événements Kubernetes, du plus récent au plus ancien : ceux du pod
+    # s'il est connu, sinon ceux du namespace.
     events: List[Dict[str, str]] = field(default_factory=list)
 
     # Séries Prometheus pertinentes.
@@ -92,7 +102,7 @@ class Evidence:
         """Sérialise les preuves en texte pour le prompt du LLM.
 
         Le format est « section : contenu », lisible par un modèle qui a
-        lu de la documentation technique. On ne cherche pas l' elegance,
+        lu de la documentation technique. On ne cherche pas l'élégance,
         on cherche la lisibilité pour le modèle.
         """
         parts: List[str] = []
@@ -133,7 +143,7 @@ class Evidence:
                 f"  [{e.get('type')}] {e.get('reason')}: {e.get('message')}"
                 for e in self.events
             )
-            parts.append("EVENEMENTS DU NAMESPACE :\n" + events_text)
+            parts.append("EVENEMENTS KUBERNETES :\n" + events_text)
 
         if self.metrics:
             parts.append("METRIQUES PROMETHEUS :\n" + _indent_yaml(self.metrics))
@@ -150,7 +160,8 @@ class Evidence:
 def _indent_yaml(data: Any, indent: int = 2) -> str:
     """Sérialise un dict en YAML indenté lisible.
 
-    On utilise `yaml.safe_dump` si disponible, sinon un repli JSON. Le YAML
+    On utilise `yaml.safe_dump` si disponible (PyYAML est une dépendance du
+    client `kubernetes`), sinon un repli JSON. Le YAML
     est plus compact et plus lisible par un modèle de langage que du JSON
     avec ses accolades et ses guillemets.
     """
@@ -187,8 +198,6 @@ async def build_k8s_client() -> aio_client.CoreV1Api:
     Le test `KUBERNETES_SERVICE_HOST` est le standard : Kubernetes injecte
     cette variable dans chaque pod.
     """
-    import os
-
     in_cluster = "KUBERNETES_SERVICE_HOST" in os.environ
     if in_cluster:
         log.info("Authentification Kubernetes : in-cluster (ServiceAccount)")
@@ -210,7 +219,7 @@ async def find_target_pod(
     core_v1: aio_client.CoreV1Api,
     alert: Alert,
     namespace: str,
-) -> tuple:
+) -> Tuple[Optional[Any], str]:
     """Trouve le pod concerné par l'alerte.
 
     Deux stratégies, dans cet ordre :
@@ -240,7 +249,9 @@ async def find_target_pod(
     if alert.pod_name:
         try:
             pod = await core_v1.read_namespaced_pod(
-                name=alert.pod_name, namespace=namespace
+                name=alert.pod_name,
+                namespace=namespace,
+                _request_timeout=API_TIMEOUT_S,
             )
             log.info(
                 "Pod identifié via annotation pod_name : %s/%s",
@@ -258,7 +269,9 @@ async def find_target_pod(
 
     # --- Stratégie 2 : déduction par labels ---------------------------
     try:
-        pods = await core_v1.list_namespaced_pod(namespace=namespace)
+        pods = await core_v1.list_namespaced_pod(
+            namespace=namespace, _request_timeout=API_TIMEOUT_S
+        )
     except Exception as exc:  # noqa: BLE001
         log.error("Impossible de lister les pods de %s : %s", namespace, exc)
         return None, "échec"
@@ -325,12 +338,12 @@ def extract_last_termination(pod) -> Dict[str, Any]:
 
       - `reason`    : "OOMKilled" (le kernel a tué pour dépassement mémoire)
                       ou "Error" (le process a lui-même quitté en erreur) ;
-      - `exitCode`  : 137 = 128 + 9 (SIGKILL, donc OOM) ou 1 (erreur
+      - `exitCode`  : 137 = 128 + 9 (SIGKILL, souvent un OOM) ou 1 (erreur
                       applicative classique) ;
       - `signal`    : 9 pour SIGKILL.
 
-    Connaître la règle "exit code 137 = SIGKILL" permet de déduire un OOM
-    même quand la raison n'est pas disponible.
+    La règle « exit code 137 = SIGKILL » permet de SOUPÇONNER un OOM quand la
+    raison manque, pas de l'affirmer : c'est `diagnosis.py` qui tranche.
     """
     result: Dict[str, Any] = {}
     statuses = pod.status.container_statuses or []
@@ -445,7 +458,10 @@ async def collect_logs(core_v1: aio_client.CoreV1Api, pod, evidence: Evidence) -
 
     try:
         logs = await core_v1.read_namespaced_pod_log(
-            name=name, namespace=namespace, tail_lines=MAX_LOG_LINES
+            name=name,
+            namespace=namespace,
+            tail_lines=MAX_LOG_LINES,
+            _request_timeout=API_TIMEOUT_S,
         )
         evidence.logs = logs.strip()
     except Exception as exc:  # noqa: BLE001
@@ -453,7 +469,11 @@ async def collect_logs(core_v1: aio_client.CoreV1Api, pod, evidence: Evidence) -
 
     try:
         previous = await core_v1.read_namespaced_pod_log(
-            name=name, namespace=namespace, previous=True, tail_lines=MAX_LOG_LINES
+            name=name,
+            namespace=namespace,
+            previous=True,
+            tail_lines=MAX_LOG_LINES,
+            _request_timeout=API_TIMEOUT_S,
         )
         evidence.previous_logs = (previous or "").strip()
     except Exception as exc:  # noqa: BLE001
@@ -462,16 +482,36 @@ async def collect_logs(core_v1: aio_client.CoreV1Api, pod, evidence: Evidence) -
 
 
 async def collect_events(
-    core_v1: aio_client.CoreV1Api, namespace: str, evidence: Evidence
+    core_v1: aio_client.CoreV1Api,
+    namespace: str,
+    evidence: Evidence,
+    pod_name: Optional[str] = None,
 ) -> None:
-    """Récupère les événements récents du namespace.
+    """Récupère les événements récents du pod, ou à défaut du namespace.
 
     Les événements racontent l'HISTORIQUE du pod en clair :
     "Back-off restarting failed container", "OOMKilled", "Killing container".
     C'est la version narrative de ce que les métriques disent en chiffres.
+
+    Quand le pod est connu, on ne demande que SES événements
+    (`involvedObject.name=<pod>`) : le filtre est appliqué par l'API
+    Kubernetes, et les MAX_EVENTS places du prompt ne sont pas prises par
+    les événements de Prometheus, Grafana ou Ollama. Si le pod n'a aucun
+    événement (cas d'un pod tout juste recréé), on retombe sur le namespace :
+    l'explication est peut-être sur le ReplicaSet (quota, image...).
     """
     try:
-        events = await core_v1.list_namespaced_event(namespace=namespace)
+        events = None
+        if pod_name:
+            events = await core_v1.list_namespaced_event(
+                namespace=namespace,
+                field_selector=f"involvedObject.name={pod_name}",
+                _request_timeout=API_TIMEOUT_S,
+            )
+        if events is None or not events.items:
+            events = await core_v1.list_namespaced_event(
+                namespace=namespace, _request_timeout=API_TIMEOUT_S
+            )
     except Exception as exc:  # noqa: BLE001
         evidence.errors.append(f"événements illisibles ({exc})")
         return
@@ -508,27 +548,78 @@ async def collect_events(
 #   3. le LLM ne connaît pas forcément les noms de métriques de NOTRE
 #      cluster — il les hallucinerait.
 #
-# On note que `container_memory_working_set_bytes` vient du job
-# `kubernetes-cadvisor`, ajouté à la config Prometheus.
+# `%(selector)s` vaut `namespace="aiops"`, complété par `pod="<nom>"` quand
+# le pod est identifié : sans ce filtre, les 10 séries retenues
+# (MAX_PROMETHEUS_SERIES) peuvent toutes concerner d'AUTRES pods du
+# namespace (Prometheus, Grafana, Ollama...) et masquer le coupable.
+#
+# `container_memory_working_set_bytes` vient du job `kubernetes-cadvisor`
+# (voir monitoring/prometheus/config.yaml). C'est la mémoire que le kernel
+# compare à la limite : son pic sur 15 minutes, rapproché de
+# `memory_limit_bytes`, distingue un OOM d'un SIGKILL d'une autre origine.
+# `container!=""` écarte la série agrégée au niveau du pod.
 PROMETHEUS_QUERIES = {
     "restarts": (
-        'increase(kube_pod_container_status_restarts_total'
-        '{namespace="%(namespace)s"}[15m])'
+        "increase(kube_pod_container_status_restarts_total{%(selector)s}[15m])"
     ),
     "last_terminated_reason": (
-        'kube_pod_container_status_last_terminated_reason'
-        '{namespace="%(namespace)s"}'
+        "kube_pod_container_status_last_terminated_reason{%(selector)s}"
     ),
     "last_terminated_exitcode": (
-        'kube_pod_container_status_last_terminated_exitcode'
-        '{namespace="%(namespace)s"}'
+        "kube_pod_container_status_last_terminated_exitcode{%(selector)s}"
+    ),
+    "memory_working_set_max_15m": (
+        'max_over_time(container_memory_working_set_bytes{%(selector)s,container!=""}[15m])'
     ),
     "memory_limit_bytes": (
-        'kube_pod_container_resource_limits'
-        '{namespace="%(namespace)s",resource="memory"}'
+        'kube_pod_container_resource_limits{%(selector)s,resource="memory"}'
     ),
-    "up": 'up{namespace="%(namespace)s"}',
+    # `up` décrit une cible de scrape, pas un pod : pas de filtre `pod`.
+    "up": "up{%(namespace_selector)s}",
 }
+
+
+def _promql_string(value: str) -> str:
+    """Échappe une valeur pour l'insérer entre guillemets dans du PromQL.
+
+    Le nom du pod et le namespace viennent de l'alerte, donc d'un payload
+    HTTP. Sans échappement, un `"` dans un label fermerait la chaîne et
+    permettrait d'injecter une autre requête.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
+
+
+def build_selectors(namespace: str, pod_name: Optional[str] = None) -> Dict[str, str]:
+    """Construit les sélecteurs de labels injectés dans PROMETHEUS_QUERIES."""
+    namespace_selector = f"namespace={_promql_string(namespace)}"
+    selector = namespace_selector
+    if pod_name:
+        selector += f",pod={_promql_string(pod_name)}"
+    return {"selector": selector, "namespace_selector": namespace_selector}
+
+
+async def _query_prometheus(http_client, prometheus_url: str, query: str) -> List[Dict]:
+    """Exécute une requête instantanée et ne garde que l'utile."""
+    response = await http_client.get(
+        f"{prometheus_url}/api/v1/query",
+        params={"query": query},
+        timeout=API_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    series = (response.json().get("data") or {}).get("result", [])
+
+    # On limite le nombre de séries pour ne pas noyer le prompt, et on ne
+    # garde que les labels qui servent au diagnostic.
+    trimmed = []
+    for serie in series[:MAX_PROMETHEUS_SERIES]:
+        labels = {
+            k: v
+            for k, v in (serie.get("metric") or {}).items()
+            if k in ("pod", "container", "job", "instance", "reason")
+        }
+        trimmed.append({"labels": labels, "value": serie.get("value", [None, None])[1]})
+    return trimmed
 
 
 async def collect_metrics(
@@ -536,6 +627,7 @@ async def collect_metrics(
     prometheus_url: str,
     namespace: str,
     evidence: Evidence,
+    pod_name: Optional[str] = None,
 ) -> None:
     """Interroge Prometheus et stocke les résultats.
 
@@ -548,32 +640,23 @@ async def collect_metrics(
 
     On stocke le résultat brut (avec les labels) plutôt que de l'agréger :
     le LLM a besoin de voir le nom du pod, pas juste une valeur.
+
+    Les requêtes sont indépendantes : elles partent EN PARALLÈLE
+    (`asyncio.gather`), la collecte dure donc le temps de la plus lente au
+    lieu de la somme des six. Les résultats sont rangés dans l'ordre de
+    PROMETHEUS_QUERIES pour que le prompt reste identique d'une fois à
+    l'autre.
     """
-    for name, template in PROMETHEUS_QUERIES.items():
-        query = template % {"namespace": namespace}
-        try:
-            response = await http_client.get(
-                f"{prometheus_url}/api/v1/query", params={"query": query}
-            )
-            response.raise_for_status()
-            payload = response.json()
-            data = payload.get("data", {})
-            series = data.get("result", [])
+    selectors = build_selectors(namespace, pod_name)
+    queries = {name: template % selectors for name, template in PROMETHEUS_QUERIES.items()}
 
-            if not series:
-                evidence.metrics[name] = {"query": query, "result": []}
-                continue
+    results = await asyncio.gather(
+        *(_query_prometheus(http_client, prometheus_url, q) for q in queries.values()),
+        return_exceptions=True,
+    )
 
-            # On limite le nombre de séries pour ne pas noyer le prompt.
-            trimmed = []
-            for serie in series[:MAX_PROMETHEUS_SERIES]:
-                labels = {
-                    k: v
-                    for k, v in (serie.get("metric") or {}).items()
-                    if k in ("pod", "container", "job", "instance", "reason")
-                }
-                trimmed.append({"labels": labels, "value": serie.get("value", [None, None])[1]})
-
-            evidence.metrics[name] = {"query": query, "result": trimmed}
-        except Exception as exc:  # noqa: BLE001
-            evidence.errors.append(f"métrique Prometheus '{name}' indisponible ({exc})")
+    for (name, query), result in zip(queries.items(), results, strict=True):
+        if isinstance(result, Exception):
+            evidence.errors.append(f"métrique Prometheus '{name}' indisponible ({result})")
+            continue
+        evidence.metrics[name] = {"query": query, "result": result}
