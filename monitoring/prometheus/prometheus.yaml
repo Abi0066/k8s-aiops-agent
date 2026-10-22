@@ -46,13 +46,14 @@ subjects:
     namespace: aiops
 ---
 # Les ConfigMaps prometheus-config et prometheus-rules ne sont PAS définis ici.
-# Ils sont générés par scripts/cluster-up.sh depuis les fichiers sources :
+# kustomize les génère depuis les fichiers sources (configMapGenerator de
+# monitoring/kustomization.yaml) :
 #   monitoring/prometheus/config.yaml         -> prometheus-config (clé prometheus.yml)
 #   monitoring/prometheus/rules/alerts.yaml  -> prometheus-rules (clé alerts.yaml)
 #
 # Pourquoi ? Parce que la configuration Prometheus est longue et commentée.
 # La garder dans un fichier .yaml à part permet de la lire, la versionner et
-# la relire sans bruit, et le script n'a plus qu'à la monter telle quelle.
+# la relire sans bruit ; kustomize n'a plus qu'à l'emballer telle quelle.
 #
 apiVersion: apps/v1
 kind: Deployment

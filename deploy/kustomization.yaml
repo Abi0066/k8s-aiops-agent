@@ -1,0 +1,19 @@
+# Point d'entrée unique du déploiement : toute la stack (étapes 1 à 3).
+#
+# C'est ce dossier qu'applique `make cluster-up` (kubectl apply -k deploy)
+# et ce dossier que Flux synchronise depuis Git (deploy/flux-sync.yaml) :
+# les deux chemins déploient exactement les mêmes objets.
+#
+# Pour voir ce qui sera appliqué, sans cluster :
+#   kubectl kustomize deploy
+#
+# flux-sync.yaml n'est volontairement PAS listé ici : c'est la configuration
+# de Flux lui-même (quel dépôt, quelle branche). Si Flux la synchronisait,
+# il remettrait l'URL du dépôt principal à chaque cycle, et un fork ne
+# pourrait plus se déployer depuis sa propre branche.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../manifests
+  - ../monitoring

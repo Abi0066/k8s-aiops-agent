@@ -7,11 +7,11 @@
 #   2. kind load    -> copie l'image dans le runtime containerd du nœud kind
 #
 # Sur un cluster réel (EKS), l'étape 2 disparaît : l'image est poussée vers un
-# registre (ECR) et le kubelet la tire. C'est ce qui se passerait à l'étape 5
-# avec le pipeline GitHub Actions.
+# registre (ECR) et le kubelet la tire. Même en GitOps (étape 5), Flux ne
+# déploie que les manifests : les images restent construites et chargées ici.
 #
 # Si le cluster n'existe pas encore, les images sont seulement construites :
-# cluster-up.sh les chargera en créant le cluster.
+# cluster-up.sh (ou gitops.sh) les chargera en créant le cluster.
 #
 set -euo pipefail
 # shellcheck source=scripts/lib.sh
@@ -69,7 +69,7 @@ done
 # ---------------------------------------------------------------------------
 if ! cluster_exists; then
     log "Le cluster '$CLUSTER_NAME' n'existe pas encore : les images sont"
-    log "construites, 'make cluster-up' les chargera."
+    log "construites, 'make cluster-up' ou 'make gitops-up' les chargera."
     exit 0
 fi
 

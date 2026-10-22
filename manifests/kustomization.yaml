@@ -1,0 +1,20 @@
+# Kustomization des manifests applicatifs (étapes 1 et 3).
+#
+# Ce fichier n'est pas un objet Kubernetes : c'est la liste que lit
+# `kustomize build` (ou `kubectl apply -k`). Il est assemblé avec celui de
+# monitoring/ dans deploy/kustomization.yaml, le point d'entrée unique.
+#
+# Un manifest absent de cette liste n'est ni déployé ni validé par
+# `make validate` : tout nouveau fichier doit y être ajouté.
+#
+# L'ordre de la liste n'a pas d'importance : kustomize trie les objets par
+# type (le Namespace d'abord, les Deployments ensuite), et les sondes de
+# disponibilité font attendre l'agent tant qu'Ollama ne répond pas.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - demo-app.yaml
+  - ollama.yaml
+  - aiops-agent.yaml
