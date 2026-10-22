@@ -15,7 +15,7 @@ CLUSTER_NAME ?= k8s-aiops
 NAMESPACE    ?= aiops
 
 .PHONY: help setup cluster-up cluster-down build demo-crash demo-oom \
-        status logs ports clean-images agent-logs agent-health
+        status logs ports clean-images agent-logs agent-health test lint
 
 ## help : affiche cette aide
 help:
@@ -91,6 +91,14 @@ ports:
 	@echo "    kubectl -n $(NAMESPACE) port-forward svc/aiops-agent 8080:8080"
 	@echo "    puis http://localhost:8080/docs (documentation interactive)"
 	@echo ""
+
+## test : lance les tests unitaires de l'agent (sans cluster)
+test:
+	@cd agent && python3 -m pytest -q
+
+## lint : vérifie le code de l'agent avec ruff
+lint:
+	@cd agent && python3 -m ruff check .
 
 ## clean-images : supprime les images locales du projet (régénérables)
 clean-images:

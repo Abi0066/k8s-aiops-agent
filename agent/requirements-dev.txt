@@ -1,0 +1,7 @@
+# Dépendances de développement : tests et lint.
+#
+# Non installées dans l'image Docker (seul requirements.txt l'est).
+# Usage : pip install -r requirements.txt -r requirements-dev.txt
+
+pytest==9.1.1
+ruff==0.17.1

@@ -1,0 +1,21 @@
+# Configuration des outils de développement de l'agent (tests, lint).
+#
+# Ce fichier ne sert PAS à construire l'image : le Dockerfile installe
+# toujours requirements.txt. Il regroupe la configuration de pytest et de
+# ruff pour que `pytest` et `ruff check` donnent le même résultat en local
+# et dans la CI.
+
+[tool.pytest.ini_options]
+# Les tests importent `app.*` : on ajoute agent/ au chemin d'import.
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F : erreurs de style et de logique (pyflakes) ; B : pièges courants
+# (bugbear). Volontairement minimal : on attrape les vrais bugs sans
+# imposer une réécriture du code existant.
+select = ["E", "F", "B"]
