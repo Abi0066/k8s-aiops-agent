@@ -119,7 +119,7 @@ kubectl apply -f monitoring/grafana/grafana.yaml
 # l'agent a besoin de le joindre (son /health le vérifie) et parce que le
 # téléchargement du modèle (initContainer) prend plusieurs minutes.
 #
-# Note : le premier déploiement d'Ollama va télécharger ~1.9 Go de modèle.
+# Note : le premier déploiement d'Ollama va télécharger ~9 Go de modèle (qwen2.5-coder:14b).
 # C'est long, mais le PVC fait que ce n'est payé qu'une fois.
 log "Déploiement d'Ollama (le modèle peut prendre plusieurs minutes à télécharger)..."
 kubectl apply -f manifests/ollama.yaml
@@ -130,9 +130,9 @@ kubectl apply -f manifests/aiops-agent.yaml
 # ---------------------------------------------------------------------------
 # 6. Vérification
 # ---------------------------------------------------------------------------
-log "Attente que les pods soient prêts (timeout 180s)..."
+log "Attente que les pods soient prêts (timeout 600s)..."
 # Le timeout est long (600 s) à cause de l'initContainer d'Ollama, qui
-# télécharge le modèle qwen2.5:3b (1.9 Go) au premier démarrage.
+# télécharge le modèle qwen2.5-coder:14b (~9 Go) au premier démarrage.
 if ! kubectl wait --for=condition=Ready pod \
         --namespace="$NAMESPACE" \
         --all \

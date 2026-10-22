@@ -28,7 +28,7 @@ flowchart LR
         Grafana["Grafana"]
         AM["Alertmanager"]
         Agent["Agent IA<br/>FastAPI :8080"]
-        Ollama["Ollama<br/>qwen2.5:3b"]
+        Ollama["Ollama<br/>qwen2.5-coder:14b"]
     end
 
     App -->|métriques /metrics| Prom
@@ -115,6 +115,21 @@ kubectl -n aiops port-forward svc/aiops-agent 8080:8080
 # puis ouvrir http://localhost:8080/docs
 ```
 
+## Tests
+
+Les tests de l'agent tournent sans cluster : Kubernetes, Prometheus et
+Ollama sont remplacés par de faux clients. Ils figent en particulier les
+verdicts de `diagnosis.py` pour chaque combinaison `reason` / `exitCode`.
+
+```bash
+cd agent
+pip install -r requirements.txt -r requirements-dev.txt
+make -C .. lint test   # ou : ruff check . && pytest -q
+```
+
+La même vérification tourne dans GitHub Actions
+(`.github/workflows/agent-ci.yml`) à chaque push et pull request.
+
 ## Structure du dépôt
 
 ```
@@ -126,8 +141,11 @@ kubectl -n aiops port-forward svc/aiops-agent 8080:8080
 │   │   ├── main.py       Service FastAPI : POST /webhook, GET /health
 │   │   ├── models.py     Modèles Pydantic du payload Alertmanager (v4)
 │   │   ├── collector.py  Collecte des preuves (API K8s + Prometheus)
+│   │   ├── diagnosis.py  Verdict déterministe (le code décide, le LLM explique)
 │   │   └── llm.py        Prompt de diagnostic + appel à Ollama
+│   ├── tests/            Tests unitaires pytest (sans cluster)
 │   ├── requirements.txt
+│   ├── requirements-dev.txt  pytest + ruff
 │   └── Dockerfile
 ├── manifests/            Manifests Kubernetes
 │   ├── demo-app.yaml     L'application de démonstration
@@ -140,6 +158,7 @@ kubectl -n aiops port-forward svc/aiops-agent 8080:8080
 │   └── kube-state-metrics.yaml
 ├── scripts/              Scripts d'installation et de pilotage
 ├── terraform/            Module VPC AWS + environnement EKS (option, non activé)
+├── .github/workflows/    CI : ruff + pytest sur chaque push et pull request
 ├── kind-config.yaml      Configuration du cluster local
 └── Makefile              Point d'entrée unique
 ```
@@ -261,14 +280,14 @@ le réseau du cluster. Les options étaient :
 
 | Option | Pour | Contre |
 |---|---|---|
-| **Ollama dans le cluster** (retenu) | tout est dans Git, tout tourne dans kind, zéro configuration réseau côté hôte | ~5 Go de téléchargement, ~3 Go de RAM |
+| **Ollama dans le cluster** (retenu) | tout est dans Git, tout tourne dans kind, zéro configuration réseau côté hôte | ~9 Go de téléchargement, ~10 Go de RAM |
 | Ollama sur l'hôte, sur `0.0.0.0` | le modèle est déjà en cache | il faut modifier le service systemd, et l'API du modèle devient joignable par le réseau local |
 | `kubectl port-forward` | rien à installer | fragile : l'agent perd sa connectivité dès que le forward tombe |
 
-Le modèle (1.9 Go) est stocké dans un **PersistentVolumeClaim**, et téléchargé
+Le modèle (~9 Go pour `qwen2.5-coder:14b`) est stocké dans un **PersistentVolumeClaim**, et téléchargé
 par un `initContainer`. Deux raisons :
 
-- **le PVC** évite de re-télécharger 1.9 Go à chaque recréation de pod ;
+- **le PVC** évite de re-télécharger ~9 Go à chaque recréation de pod ;
 - **l'initContainer** garantit que le pod n'est pas `Ready` tant que le
   modèle n'est pas là. L'agent ne doit pas recevoir de webhook alors que le
   modèle manque.
