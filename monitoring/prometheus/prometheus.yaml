@@ -74,12 +74,18 @@ spec:
     spec:
       serviceAccountName: prometheus
       securityContext:
-        # Les pods Prometheus tournent en root dans l'image officielle
-        # (il a besoin d'écrire dans /prometheus). Sur un cluster durci on
-        # utiliserait un fsGroup et un user non-root — documenté dans le
-        # README comme piste d'amélioration.
-        runAsUser: 0
-        runAsGroup: 0
+        # L'image officielle tourne déjà sous `nobody` (UID 65534). On
+        # l'impose ici et Kubernetes refuse de lancer le pod s'il devait
+        # tourner en root. fsGroup donne à ce groupe l'accès en écriture aux
+        # volumes : Prometheus n'écrit que dans /prometheus (TSDB).
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        # Profil seccomp par défaut du runtime : bloque les appels système
+        # rares dont un serveur HTTP n'a jamais besoin.
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: prometheus
           image: quay.io/prometheus/prometheus:v3.7.3
@@ -95,6 +101,16 @@ spec:
           ports:
             - name: http
               containerPort: 9090
+          # Le conteneur n'a besoin d'aucun privilège : aucune capacité
+          # Linux, pas d'élévation via un binaire setuid, et un système de
+          # fichiers en lecture seule (seul le volume /prometheus est
+          # inscriptible). Une faille dans Prometheus ne pourrait ni modifier
+          # le binaire ni s'installer dans l'image.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus

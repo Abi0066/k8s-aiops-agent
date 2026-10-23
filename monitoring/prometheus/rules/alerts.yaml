@@ -78,12 +78,16 @@ groups:
       - alert: DemoAppHighLatency
         # histogram_quantile(0.95, ...) calcule le 95e centile de la latence
         # à partir de l'histogramme demo_app_request_duration_seconds.
-        # On ne prend en compte que le bucket "le" (less-or-equal) pour que
-        # le calcul du quantile soit correct.
+        # La somme regroupe les buckets de toutes les routes. Elle doit
+        # garder `le` (la borne de chaque bucket), sans laquelle le quantile
+        # est incalculable, et `namespace` : la règle d'inhibition
+        # d'Alertmanager compare le namespace de cette alerte à celui de
+        # DemoAppDown. Sans lui, la latence ne serait jamais masquée quand
+        # l'application est tombée.
         expr: |
           histogram_quantile(
             0.95,
-            sum by (le) (rate(demo_app_request_duration_seconds_bucket{job="demo-app"}[5m]))
+            sum by (le, namespace) (rate(demo_app_request_duration_seconds_bucket{job="demo-app"}[5m]))
           ) > 0.5
         for: 3m
         labels:

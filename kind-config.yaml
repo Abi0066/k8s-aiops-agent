@@ -47,9 +47,6 @@ nodes:
         listenAddress: "127.0.0.1"
         protocol: TCP
 
-      # Service webhook de l'agent IA (étape 3) — réservé ici pour que le
-      # cluster soit déjà dimensionné pour les étapes suivantes.
-      - containerPort: 30095
-        hostPort: 30095
-        listenAddress: "127.0.0.1"
-        protocol: TCP
+      # L'agent IA (étape 3) n'a pas de port ici : Alertmanager l'appelle à
+      # l'intérieur du cluster, et `kubectl port-forward` suffit pour
+      # l'atteindre depuis l'hôte.

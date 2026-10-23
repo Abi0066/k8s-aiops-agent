@@ -23,18 +23,20 @@ GET /metrics  Endpoint Prometheus. Expose les compteurs et histogrammes
 
 import logging
 import os
+import signal
+import sys
 import time
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, g, jsonify, request
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Logging vers stdout : dans un conteneur, stdout est capturé par le
-# runtime et visible via `kubectl logs`. Écrire sur un fichier local
-# ne serait pas collecté.
+# Logging vers la sortie d'erreur (stderr, le défaut de basicConfig) : dans
+# un conteneur, stdout et stderr sont capturés par le runtime et visibles via
+# `kubectl logs`. Écrire sur un fichier local ne serait pas collecté.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -49,7 +51,7 @@ app = Flask(__name__)
 
 # Counter : compteur monotone qui ne fait qu'augmenter. On l'utilise pour
 # compter des événements (ici : nombre de requêtes par endpoint).
-# Le label "endpoint" permet de.slice les métriques par route.
+# Le label "endpoint" permet de découper les métriques par route.
 REQUESTS = Counter(
     "demo_app_requests_total",
     "Nombre total de requêtes reçues par l'application de démonstration",
@@ -91,8 +93,8 @@ def crash():
 
     `os._exit(1)` termine immédiatement le process, sans exécuter les
     `finally` Python ni les hooks de graceful shutdown (atexit, signal
-    handlers). C'est volontairement le comportement le plus brutal : c'est ce
-    que produit un vrai segfault ou un `kill -9`, et c'est ce que l'agent
+    handlers). Comme lors d'un vrai plantage, aucun code de nettoyage ne
+    tourne ; la seule trace est le code de sortie 1, et c'est ce que l'agent
     devra diagnostiquer.
 
     POURQUOI CELA PRODUIT UN REDEMARRAGE DU POD
@@ -115,16 +117,18 @@ def crash():
     - `sys.exit(1)` : lève SystemExit, le process se termine proprement.
       Kubernetes verrait quand même un exit code 1, mais la distinction
       "arrêt propre" vs "crash" se perd dans les logs.
-    - `raise Exception` : le serveur Flask remonte l'erreur et le process
-      meurt. Plus lent et moins déterministe.
+    - `raise Exception` : NE MARCHE PAS. Flask intercepte l'exception et
+      renvoie une erreur 500 ; le process survit et aucun incident n'est
+      visible côté Kubernetes.
     - `os.kill(1, signal.SIGKILL)` : NE MARCHE PAS. Le noyau ignore les
       signaux sans handler envoyés au PID 1 d'un namespace, et SIGKILL ne
       peut pas être intercepté. Le signal est donc silencieusement perdu.
     """
     REQUESTS.labels(endpoint="crash").inc()
     logger.warning("Crash simulé sur /crash — terminaison du process (exit 1)")
-    # sys.stdout.flush() pour s'assurer que le log est bien émis avant que
-    # le process ne meure.
+    # Pas besoin de flush : le handler de logging vide son tampon après
+    # chaque message, donc l'avertissement est déjà écrit quand le process
+    # meurt.
     os._exit(1)
 
 
@@ -139,14 +143,14 @@ def oom():
 
     Point important pour la suite du projet : c'est le kernel qui tue le
     process, pas Python. Le signal SIGKILL n'est pas rattrapable — aucun
-    handler Python ne peut s'exécuter, donc le message "Mémoire exhausted"
+    handler Python ne peut s'exécuter, donc le message "MemoryError Python"
     n'apparaît PAS dans les logs de l'application. L'agent devra déduire la
     cause depuis les événements Kubernetes et l'état du pod, pas depuis les
     logs de la seule application. C'est précisément ce qui rend le
     scénario intéressant.
     """
     REQUESTS.labels(endpoint="oom").inc()
-    logger.warning("OOM simulé sur /oom — allocation mémoire au-delà de la limit")
+    logger.warning("OOM simulé sur /oom — allocation mémoire au-delà de la limite")
 
     # On alloue par blocs de 8 Mo. La boucle continue tant qu'on n'a pas
     # dépassé la limite : le noyau va tuer le process avant la fin.
@@ -179,7 +183,10 @@ def metrics():
 
 @app.before_request
 def _before():
-    request._start_time = time.perf_counter()
+    # `g` est l'espace prévu par Flask pour les données d'une requête : il
+    # est remis à zéro à chaque requête, contrairement à un attribut ajouté
+    # à la main sur l'objet `request`.
+    g.start_time = time.perf_counter()
 
 
 @app.after_request
@@ -191,7 +198,7 @@ def _after(response):
     plutôt qu'à l'extérieur où l'on ne verrait qu'un chemin d'URL.
     """
     endpoint = request.endpoint or "unknown"
-    LATENCY.labels(endpoint=endpoint).observe(time.perf_counter() - request._start_time)
+    LATENCY.labels(endpoint=endpoint).observe(time.perf_counter() - g.start_time)
     return response
 
 
@@ -203,14 +210,27 @@ if __name__ == "__main__":
     # gunicorn est un superviseur : il lance un master (PID 1 dans le
     # conteneur) et N workers. Un worker qui meurt est relayé par le master.
     # Notre endpoint /crash appelle os._exit(1) : avec gunicorn, seul le
-    # worker qui a servi la requête est tué, le master en relance un autre, et le conteneur
-    # survit — donc aucun redémarrage de pod, aucun incident observable.
+    # worker qui a servi la requête est tué, le master en relance un autre, et
+    # le conteneur survit — donc aucun redémarrage de pod, aucun incident
+    # observable.
     #
     # waitress est mono-processus : le process Python EST le PID 1. os._exit(1)
     # tue donc le PID 1, le conteneur s'arrête, et Kubernetes redémarre le pod.
     #
     # Vérifié : avec waitress, le conteneur sort avec le code 1, ce que
     # Kubernetes affiche comme "Reason: Error, Exit Code: 1".
+    #
+    # Revers du PID 1 : le noyau ignore les signaux sans handler qu'il reçoit.
+    # Sans le handler ci-dessous, le SIGTERM de Kubernetes (suppression du
+    # pod, rollout, sonde de vivacité en échec) serait perdu : le kubelet
+    # attendrait terminationGracePeriodSeconds, puis enverrait SIGKILL, et le
+    # conteneur finirait avec le code 137 — celui d'un OOM, que l'agent IA
+    # prendrait pour une fuite mémoire.
+    #
+    # SystemExit interrompt la boucle de waitress, qui laisse les requêtes en
+    # cours se terminer puis rend la main : le process sort avec le code 0.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
     from waitress import serve
 
     serve(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))

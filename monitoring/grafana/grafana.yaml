@@ -48,11 +48,15 @@ spec:
         app: grafana
     spec:
       securityContext:
-        # Grafana a besoin d'écrire dans /var/lib/grafana (base de données
-        # locale SQLite). On laisse le groupe 0 (root) pour ce pod, mais on
-        # retire les capabilities superflues — c'est une bonne pratique même
-        # quand on ne va pas plus loin.
-        fsGroup: 0
+        # L'image officielle tourne sous l'utilisateur `grafana` (UID 472).
+        # fsGroup lui donne l'écriture sur /var/lib/grafana (base SQLite
+        # locale). Mêmes valeurs que le chart Helm officiel.
+        runAsNonRoot: true
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: grafana
           image: docker.io/grafana/grafana:12.3.0
@@ -66,7 +70,10 @@ spec:
               value: "true"
             - name: GF_AUTH_ANONYMOUS_ORG_ROLE
               value: "Viewer"
-            # Désactive la rotation des mots de passe au premier démarrage.
+            # Mot de passe admin initial, en clair : acceptable uniquement
+            # parce que Grafana n'est joignable que depuis la machine locale
+            # (kind-config.yaml lie le port à 127.0.0.1). Sur un vrai
+            # cluster, il viendrait d'un Secret (valueFrom.secretKeyRef).
             - name: GF_SECURITY_ADMIN_PASSWORD
               value: "admin"
             - name: GF_USERS_ALLOW_SIGN_UP
@@ -74,6 +81,12 @@ spec:
           ports:
             - name: http
               containerPort: 3000
+          # Pas de readOnlyRootFilesystem : Grafana écrit aussi ses logs et
+          # ses plugins dans l'image. Le reste du durcissement s'applique.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           volumeMounts:
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
@@ -94,6 +107,15 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 5
+          # /api/health vérifie aussi la base SQLite : si elle devient
+          # inaccessible, Kubernetes redémarre le conteneur au lieu de le
+          # laisser servir des erreurs.
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
       volumes:
         - name: datasources
           configMap:

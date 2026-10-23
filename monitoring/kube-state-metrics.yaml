@@ -30,7 +30,15 @@ metadata:
     app.kubernetes.io/name: kube-state-metrics
 ---
 # RBAC : kube-state-metrics a besoin de LIRE l'état des objets. Il n'écrit
-# jamais. Le ClusterRole est en lecture seule sur les ressources listées.
+# jamais.
+#
+# Le projet n'exploite que des métriques de pods (redémarrages, raison et
+# code du dernier arrêt, phase, limites). KSM est donc lancé avec
+# `--resources=pods` (voir le Deployment) et n'a le droit de lire QUE les
+# pods. Le manifest upstream lui donne aussi la lecture des Secrets de tout
+# le cluster : un droit dangereux dont on n'a pas l'usage. Pour exposer
+# d'autres objets (deployments, nodes...), ajouter la ressource aux deux
+# endroits.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -39,49 +47,7 @@ metadata:
     app.kubernetes.io/name: kube-state-metrics
 rules:
   - apiGroups: [""]
-    resources:
-      - configmaps
-      - endpoints
-      - limitranges
-      - namespaces
-      - nodes
-      - persistentvolumeclaims
-      - persistentvolumes
-      - pods
-      - replicationcontrollers
-      - resourcequotas
-      - secrets
-      - services
-    verbs: ["list", "watch"]
-  - apiGroups: ["apps"]
-    resources:
-      - daemonsets
-      - deployments
-      - replicasets
-      - statefulsets
-    verbs: ["list", "watch"]
-  - apiGroups: ["batch"]
-    resources:
-      - cronjobs
-      - jobs
-    verbs: ["list", "watch"]
-  - apiGroups: ["autoscaling"]
-    resources:
-      - horizontalpodautoscalers
-    verbs: ["list", "watch"]
-  - apiGroups: ["networking.k8s.io"]
-    resources:
-      - ingresses
-      - networkpolicies
-    verbs: ["list", "watch"]
-  - apiGroups: ["storage.k8s.io"]
-    resources:
-      - storageclasses
-      - volumeattachments
-    verbs: ["list", "watch"]
-  - apiGroups: ["policy"]
-    resources:
-      - poddisruptionbudgets
+    resources: ["pods"]
     verbs: ["list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -118,15 +84,17 @@ spec:
         app: kube-state-metrics
     spec:
       serviceAccountName: kube-state-metrics
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: kube-state-metrics
           # Version épinglée. Le digest est omis ici pour la lisibilité, mais
           # un vrai déploiement devrait le figer (voir l'étape 5 / Trivy).
           image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.17.0
           # L'image est chargée dans le nœud par `make build` (kind load).
-          # Sans ce Never, le kubelet tenterait de la tirer depuis le registre
-          # distant — ce qui marcherait aussi, mais slower et dependent du réseau.
-          # Never est le bon choix pour un cluster local hors ligne.
+          # IfNotPresent l'utilise sans contacter le registre, tout en restant
+          # capable de la tirer si elle manque (cluster recréé sans build).
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -138,15 +106,20 @@ spec:
             limits:
               memory: "256Mi"
               cpu: "100m"
-          # --telemetry-port: on le désactive, on n'en a pas besoin et cela
+          # --resources : seuls les pods sont collectés (voir le ClusterRole).
+          # Moins d'objets surveillés, c'est moins de mémoire et moins
+          # d'appels à l'API server.
+          # --telemetry-port : on le désactive, on n'en a pas besoin et cela
           # ouvre un port inutile dans le pod.
           args:
+            - --resources=pods
             - --telemetry-port=0
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             runAsUser: 65534
+            runAsGroup: 65534
             capabilities:
               drop: ["ALL"]
 ---

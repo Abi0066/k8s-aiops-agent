@@ -2,9 +2,9 @@
 #
 # Contenu de la configuration officielle Prometheus (format YAML) :
 #   global       -> fréquence de scrape et règles d'évaluation
-#   alerting    -> où envoyer les alertes qui se déclenchent (notre webhook IA)
-#   rule_files   -> fichiers de règles d'alerte (.yaml)
-#   scrape_configs -> qui prometer et à quelle fréquence
+#   alerting       -> où envoyer les alertes qui se déclenchent (Alertmanager)
+#   rule_files     -> fichiers de règles d'alerte (.yaml)
+#   scrape_configs -> quelles cibles scraper, et comment
 #
 # Prometheus « vanilla » : aucun CRD, aucun Prometheus Operator. Les règles
 # d'alerte sont des groupes (groups:) au format standard Prometheus, ce qui les
@@ -21,11 +21,11 @@ global:
 # ---------------------------------------------------------------------------
 # Alertes — Étape 2
 # ---------------------------------------------------------------------------
-# Prometheus v3 ne sait plus envoyer d'alerte directement à un webhook : la
-# section `alerting.webhook_configs` a été supprimée du schéma. Le chemin
-# standard est désormais Prometheus -> Alertmanager -> notre agent IA.
+# Prometheus n'envoie jamais d'alerte directement à un webhook : il ne sait
+# parler qu'à Alertmanager. Le chemin est donc
+# Prometheus -> Alertmanager -> notre agent IA.
 #
-# Alertmanager apporte ce que le webhook direct n'avait pas :
+# Alertmanager apporte ce qu'un envoi direct n'aurait pas :
 #   - grouping    : plusieurs alertes similaires -> une seule notification
 #   - inhibition  : une alerte "pod down" masque les alertes du même pod
 #   - repeat_interval : on ne renvoie pas la même alerte en boucle
@@ -65,38 +65,53 @@ scrape_configs:
       - targets: ["localhost:9090"]
 
   # L'application de démonstration. On cible le Service Kubernetes par son nom
-  # DNS interne : prometheus résout automatiquement le Service et scrape
-  # chaque pod derrière. Kubernetes fait le load-balancing (iproute2 / IPVS).
+  # DNS interne : chaque scrape passe par le Service, qui l'envoie à UN pod
+  # (load-balancing iptables / IPVS de kube-proxy).
   #
-  # On utilise une cible statique plutôt que kubernetes_sd_configs : c'est
-  # plus simple, et cela agrège les métriques de tous les pods du Service sous
-  # une seule cible (plus lisible dans Grafana).
+  # Une cible statique est plus simple que kubernetes_sd_configs et suffit
+  # avec un seul replica. Avec plusieurs replicas, chaque scrape tomberait
+  # sur un pod différent : il faudrait alors kubernetes_sd_configs (role:
+  # endpoints) pour scraper chaque pod séparément.
   - job_name: demo-app
     static_configs:
       - targets: ["demo-app.aiops.svc.cluster.local:80"]
         labels:
           service: demo-app
+          # Une cible statique ne porte pas de namespace. On l'ajoute pour
+          # que DemoAppDown en ait un, comme les autres alertes : le routage
+          # d'Alertmanager (group_by) et la règle d'inhibition s'appuient
+          # dessus, et l'agent sait dans quel namespace enquêter.
+          namespace: aiops
 
   # kube-state-metrics expose l'ÉTAT courant des objets Kubernetes sous forme
   # de métriques (nombre de redémarrages, raison du dernier arrêt, phase du
   # pod...). C'est la source de kube_pod_container_status_restarts_total, utilisée
   # par la règle DemoAppCrashLooping. Sans ce composant, la détection de crash
   # est impossible : le kubelet seul n'expose pas l'historique des redémarrages.
+  #
+  # Pas de label `namespace` ajouté ici, contrairement à demo-app : chaque
+  # série de kube-state-metrics porte déjà le namespace de l'objet qu'elle
+  # décrit. Un label de cible du même nom le renommerait en
+  # `exported_namespace` et casserait les règles d'alerte.
   - job_name: kube-state-metrics
     static_configs:
       - targets: ["kube-state-metrics.aiops.svc.cluster.local:8080"]
 
-  # Les composants système de Kubernetes (kubelet, kube-proxy, etcd, API
-  # server). Ce n'est pas nécessaire pour la démonstration, mais c'est ce qui
-  # fait la différence entre "un Prometheus qui scrape une app" et "une
-  # plateforme d'observabilité". Les métriques kubelet sont aussi ce qui
-  # permet de détecter un OOMKill au niveau du pod.
+  # Les métriques du kubelet de chaque nœud (pods lancés, opérations du
+  # runtime, volumes...). Pas indispensable à la démonstration, mais c'est la
+  # base d'une vraie supervision de cluster.
+  #
+  # Prometheus ne contacte pas le kubelet directement : il passe par le proxy
+  # de l'API server (/api/v1/nodes/<nœud>/proxy/...), avec le token de son
+  # ServiceAccount. Le certificat de l'API server couvre le nom
+  # kubernetes.default.svc : la vérification TLS reste donc active, avec la
+  # CA du cluster montée dans chaque pod.
   - job_name: kubernetes-nodes
     scheme: https
     tls_config:
       ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-      insecure_skip_verify: true
-    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    authorization:
+      credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
     kubernetes_sd_configs:
       - role: node
     relabel_configs:
@@ -112,25 +127,24 @@ scrape_configs:
   # -------------------------------------------------------------------------
   # cAdvisor : la consommation réelle des conteneurs
   # -------------------------------------------------------------------------
-  # Le job précédent (/metrics du kubelet) donne l'ACTIVITE du node, mais
+  # Le job précédent (/metrics du kubelet) donne l'ACTIVITÉ du nœud, mais
   # pas la consommation mémoire/CPU de chaque conteneur. Cette donnée vit
   # dans un endpoint distinct du kubelet : /metrics/cadvisor, alimenté par
-  # le « container metrics » de cAdvisor.
+  # cAdvisor, intégré au kubelet.
   #
   # C'est INDISPENSABLE pour le diagnostic d'un OOMKill : sans
   # container_memory_working_set_bytes, l'agent sait que le conteneur a été
   # tué (exit code 137) mais pas s'il approchait de sa limite. Avec, il
   # peut dire « le conteneur utilisait 126 Mi sur une limite de 128 Mi ».
   #
-  # Sur un cluster EKS managed, ce job est normalement fourni par le
-  # kubelet lui-même avec un nom du type "containerResourceMetrics"; on le
-  # déclare ici pour rester explicite et indépendant du fournisseur.
+  # Même accès que le job précédent (proxy de l'API server), seul le chemin
+  # change.
   - job_name: kubernetes-cadvisor
     scheme: https
     tls_config:
       ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-      insecure_skip_verify: true
-    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    authorization:
+      credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
     kubernetes_sd_configs:
       - role: node
     relabel_configs:

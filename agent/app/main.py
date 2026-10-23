@@ -26,12 +26,14 @@ Flux général
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, status
@@ -72,8 +74,15 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:14b")
 # Le namespace Kubernetes que l'agent surveille.
 WATCHED_NAMESPACE = os.environ.get("WATCHED_NAMESPACE", "aiops")
 
-# Timeout de l'appel au LLM. Long : un modèle 3B sur CPU est lent.
+# Timeout de l'appel au LLM. Long : un modèle de 14 milliards de paramètres
+# sur CPU met plusieurs dizaines de secondes à répondre, davantage au premier
+# appel (chargement du modèle en mémoire).
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "300"))
+
+# Fenêtre d'anti-doublon, en secondes. Alertmanager renvoie TOUT le groupe
+# dès qu'une alerte y entre ou en sort (group_interval) : sans ce garde-fou,
+# une alerte déjà diagnostiquée repartirait pour 30 à 90 s d'inférence.
+DEDUP_WINDOW_S = float(os.environ.get("DEDUP_WINDOW_S", "600"))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -93,6 +102,10 @@ log = logging.getLogger("aiops-agent")
 # à chaque requête serait coûteux (nouvelle connexion TLS à chaque fois).
 core_v1 = None
 http_client: httpx.AsyncClient | None = None
+
+# Empreintes des alertes récemment prises en charge -> instant (monotonic).
+# Un simple dict suffit : l'agent tourne avec un seul processus uvicorn.
+_recent_alerts: Dict[str, float] = {}
 
 
 @asynccontextmanager
@@ -207,41 +220,29 @@ async def health() -> JSONResponse:
     C'est ce qui distingue une panne « l'agent est mort » d'une panne
     « l'agent est vivant mais ne peut rien faire ».
     """
-    checks: Dict[str, Any] = {}
-
     if http_client is None:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"status": "starting", "checks": {}},
         )
 
-    ollama = await check_ollama_health(http_client, OLLAMA_URL)
-    checks["ollama"] = {
-        "ok": ollama["ok"],
-        "models": ollama["models"],
-        "error": ollama["error"],
+    # Les trois vérifications sont indépendantes : on les lance en parallèle.
+    # La sonde répond ainsi en max(t1, t2, t3) et non en t1 + t2 + t3, ce qui
+    # compte quand une dépendance est lente et que le kubelet attend.
+    ollama, prometheus, kubernetes = await asyncio.gather(
+        check_ollama_health(http_client, OLLAMA_URL),
+        _check_prometheus(),
+        _check_kubernetes(),
+    )
+    checks: Dict[str, Any] = {
+        "ollama": {
+            "ok": ollama["ok"],
+            "models": ollama["models"],
+            "error": ollama["error"],
+        },
+        "prometheus": prometheus,
+        "kubernetes": kubernetes,
     }
-
-    try:
-        response = await http_client.get(
-            f"{PROMETHEUS_URL}/-/ready", timeout=5.0
-        )
-        prom_ok = response.status_code == 200
-        prom_error = None if prom_ok else f"HTTP {response.status_code}"
-    except Exception as exc:  # noqa: BLE001
-        prom_ok = False
-        prom_error = str(exc)
-
-    checks["prometheus"] = {"ok": prom_ok, "error": prom_error}
-
-    # Le client Kubernetes : on vérifie qu'on peut lister les pods.
-    try:
-        if core_v1 is None:
-            raise RuntimeError("client Kubernetes non initialisé")
-        await core_v1.list_namespaced_pod(namespace=WATCHED_NAMESPACE, limit=1)
-        checks["kubernetes"] = {"ok": True, "error": None}
-    except Exception as exc:  # noqa: BLE001
-        checks["kubernetes"] = {"ok": False, "error": str(exc)}
 
     model_present = OLLAMA_MODEL in (ollama["models"] or [])
     checks["model_present"] = model_present
@@ -259,6 +260,59 @@ async def health() -> JSONResponse:
             "checks": checks,
         },
     )
+
+
+async def _check_prometheus() -> Dict[str, Any]:
+    """Prometheus répond-il sur son endpoint de disponibilité ?"""
+    try:
+        response = await http_client.get(f"{PROMETHEUS_URL}/-/ready", timeout=5.0)
+        ok = response.status_code == 200
+        return {"ok": ok, "error": None if ok else f"HTTP {response.status_code}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+async def _check_kubernetes() -> Dict[str, Any]:
+    """Le client Kubernetes peut-il lister les pods du namespace surveillé ?"""
+    try:
+        if core_v1 is None:
+            raise RuntimeError("client Kubernetes non initialisé")
+        await core_v1.list_namespaced_pod(
+            namespace=WATCHED_NAMESPACE, limit=1, _request_timeout=5.0
+        )
+        return {"ok": True, "error": None}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+def _alert_key(alert: Alert) -> str:
+    """Identité d'un incident : l'empreinte Alertmanager + son début.
+
+    `startsAt` distingue deux incidents successifs de la même alerte (elle
+    s'est résolue puis a redémarré) : le second doit être analysé.
+    """
+    identity = alert.fingerprint or json.dumps(alert.labels, sort_keys=True)
+    return f"{identity}@{alert.startsAt}"
+
+
+def _new_alerts(alerts: List[Alert]) -> List[Alert]:
+    """Filtre les alertes déjà prises en charge dans la fenêtre d'anti-doublon.
+
+    Les alertes retenues sont marquées immédiatement : deux webhooks reçus
+    coup sur coup ne lanceront qu'une analyse.
+    """
+    now = time.monotonic()
+    for key, seen_at in list(_recent_alerts.items()):
+        if now - seen_at > DEDUP_WINDOW_S:
+            del _recent_alerts[key]
+
+    fresh = []
+    for alert in alerts:
+        key = _alert_key(alert)
+        if key not in _recent_alerts:
+            _recent_alerts[key] = now
+            fresh.append(alert)
+    return fresh
 
 
 @app.post("/webhook", summary="Réception des alertes Alertmanager")
@@ -282,6 +336,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
     modèle FastAPI. Raison : un receiver Alertmanager doit être tolérant.
     Si le payload est invalide, on renvoie `400` avec un message clair —
     Alertmanager le notifiera dans ses logs sans boucler.
+
+    **Les doublons.** Une alerte déjà prise en charge dans les
+    `DEDUP_WINDOW_S` dernières secondes n'est pas réanalysée : elle est
+    comptée dans `duplicates`.
     """
     try:
         raw_body = await request.body()
@@ -303,6 +361,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
         )
 
     firing = group.firing_alerts
+    to_analyze = _new_alerts(firing)
 
     log.info(
         "Webhook reçu : version=%s receiver=%s alerts=%d (firing=%d)",
@@ -323,16 +382,22 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
             content={"status": "accepted", "analyzed": 0, "reason": "no firing alerts"},
         )
 
+    duplicates = len(firing) - len(to_analyze)
+    if duplicates:
+        log.info("%d alerte(s) déjà prise(s) en charge récemment : ignorée(s).", duplicates)
+
     # On planifie le traitement en tâche de fond. FastAPI l'exécutera APRÈS
     # l'envoi de la réponse HTTP.
-    background_tasks.add_task(process_alerts, group)
+    if to_analyze:
+        background_tasks.add_task(process_alerts, to_analyze)
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={
             "status": "accepted",
-            "analyzed": len(firing),
-            "alertnames": [a.alertname for a in firing],
+            "analyzed": len(to_analyze),
+            "duplicates": duplicates,
+            "alertnames": [a.alertname for a in to_analyze],
         },
     )
 
@@ -340,7 +405,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
 # ---------------------------------------------------------------------------
 # Traitement en tâche de fond
 # ---------------------------------------------------------------------------
-async def process_alerts(group: AlertGroup) -> None:
+async def process_alerts(alerts: List[Alert]) -> None:
     """Traite chaque alerte « firing » : collecte des preuves puis diagnostic.
 
     Cette fonction est exécutée APRÈS l'envoi de la réponse HTTP. Deux
@@ -352,11 +417,11 @@ async def process_alerts(group: AlertGroup) -> None:
 
     2. **Si le pod est redémarré pendant le traitement, la tâche est
        perdue.** Acceptable pour une démonstration ; en production, il
-       faudrait une file de travail (Redis, RabbitMQ, ou le ``Queue`` de
-       Kubernetes). C'est une limite connue, documentée dans le README.
+       faudrait une file de travail persistante (Redis, RabbitMQ...). C'est
+       une limite connue, documentée dans le README.
     """
     try:
-        for alert in group.firing_alerts:
+        for alert in alerts:
             await analyze_one_alert(alert)
     except Exception as exc:  # noqa: BLE001
         log.exception("Erreur globale pendant le traitement des alertes : %s", exc)
@@ -406,26 +471,34 @@ async def analyze_one_alert(alert: Alert) -> None:
             log.info("Pod cible : %s (trouvé via %s)", pod.metadata.name, method)
             evidence.pod_status = summarize_pod_status(pod)
             evidence.last_termination = extract_last_termination(pod)
-            await collect_logs(core_v1, pod, evidence)
         else:
             evidence.errors.append("aucun pod identifié")
             log.warning("Aucun pod identifié pour l'alerte %s", alert.alertname)
     else:
         evidence.errors.append("client Kubernetes non initialisé")
 
-    # --- 2. Événements du namespace -----------------------------------
+    # --- 2. Logs, événements et métriques, en parallèle ---------------
+    # Les trois collectes ne dépendent que du pod identifié à l'étape 1 et
+    # écrivent chacune dans leur propre champ de `evidence` : on les lance
+    # ensemble plutôt que l'une après l'autre.
+    collections = []
     if core_v1 is not None:
-        await collect_events(core_v1, namespace, evidence)
-
-    # --- 3. Métriques Prometheus --------------------------------------
+        if pod:
+            collections.append(collect_logs(core_v1, pod, evidence))
+        collections.append(collect_events(core_v1, namespace, evidence, evidence.pod_name))
     if http_client is not None:
-        await collect_metrics(http_client, PROMETHEUS_URL, namespace, evidence)
+        collections.append(
+            collect_metrics(
+                http_client, PROMETHEUS_URL, namespace, evidence, evidence.pod_name
+            )
+        )
+    await asyncio.gather(*collections)
 
-    # --- 4. Verdict déterministe -------------------------------------
+    # --- 3. Verdict déterministe -------------------------------------
     # Le code tranche la cause à partir des champs structurés (raison
     # d'arrêt, code de sortie). Le LLM, lui, se contente de rédiger.
     #
-    # C'est ce qui empêche un modèle 3B de recomposer une histoire plausible
+    # C'est ce qui empêche un petit modèle de recomposer une histoire plausible
     # mais fausse à partir de données secondaires (comme la limite de
     # mémoire, qui est une constante de configuration et pas un
     # symptôme). Détail dans le module `diagnosis`.
@@ -433,7 +506,7 @@ async def analyze_one_alert(alert: Alert) -> None:
     verdict_block = format_verdict_for_prompt(verdict)
     log.info("Verdict déterministe :\n%s", verdict_block)
 
-    # --- 5. Diagnostic rédigé par le LLM ------------------------------
+    # --- 4. Diagnostic rédigé par le LLM ------------------------------
     context = evidence.to_prompt_context()
     log.info(
         "Preuves collectées (%d caractères) :\n%s",
@@ -455,7 +528,7 @@ async def analyze_one_alert(alert: Alert) -> None:
 
     elapsed = (datetime.now(timezone.utc) - started).total_seconds()
 
-    # --- 6. Journalisation du résultat --------------------------------
+    # --- 5. Journalisation du résultat --------------------------------
     log.info("-" * 70)
     if result.get("ok"):
         log.info(

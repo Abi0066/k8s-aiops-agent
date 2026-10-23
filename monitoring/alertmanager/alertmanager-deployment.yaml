@@ -26,6 +26,16 @@ spec:
       labels:
         app: alertmanager
     spec:
+      # Même durcissement que Prometheus (voir monitoring/prometheus/
+      # prometheus.yaml) : l'image tourne sous `nobody` et n'écrit que dans
+      # son volume de données /alertmanager (silences, état des envois).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: alertmanager
           image: quay.io/prometheus/alertmanager:v0.29.0
@@ -36,6 +46,11 @@ spec:
           ports:
             - name: http
               containerPort: 9093
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           volumeMounts:
             - name: config
               mountPath: /etc/alertmanager

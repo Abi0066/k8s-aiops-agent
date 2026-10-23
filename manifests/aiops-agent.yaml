@@ -95,6 +95,14 @@ spec:
       # défaut depuis Kubernetes 1.24 — le token est monté dans le pod.
       # On le déclare explicitement pour que le lien soit visible.
       automountServiceAccountToken: true
+      # Même durcissement que demo-app : UID 1000 imposé (USER du
+      # Dockerfile), aucune capacité, système de fichiers en lecture seule.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: aiops-agent
           image: localhost/aiops-agent:1.0.0
@@ -102,6 +110,14 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           env:
             # Adresse d'Ollama : nom DNS interne du Service Kubernetes.
             # Jamais une IP en dur : le Service assure le load-balancing
@@ -110,15 +126,26 @@ spec:
               value: "http://ollama.aiops.svc.cluster.local:11434"
             - name: PROMETHEUS_URL
               value: "http://prometheus.aiops.svc.cluster.local:9090"
+            # Le modèle est déclaré une seule fois, dans la ConfigMap
+            # d'Ollama (manifests/ollama.yaml) : l'initContainer d'Ollama
+            # télécharge exactement celui que l'agent va appeler.
             - name: OLLAMA_MODEL
-              value: "qwen2.5-coder:14b"
+              valueFrom:
+                configMapKeyRef:
+                  name: ollama-config
+                  key: model
             - name: WATCHED_NAMESPACE
               value: "aiops"
-            # Timeout de l'appel au LLM : long, car un modèle 3B sur CPU
-            # peut prendre 30 à 90 secondes (surtout la première fois,
-            # où le modèle doit être chargé en mémoire).
+            # Timeout de l'appel au LLM : long, car un modèle 14B sans GPU
+            # peut mettre plusieurs minutes à répondre (surtout la première
+            # fois, où le modèle doit être chargé en mémoire).
             - name: LLM_TIMEOUT
               value: "300"
+            # Fenêtre anti-doublon, en secondes : une alerte déjà analysée
+            # (même empreinte, même début) n'est pas renvoyée au LLM quand
+            # Alertmanager renvoie son groupe.
+            - name: DEDUP_WINDOW_S
+              value: "600"
           resources:
             requests:
               memory: "128Mi"
@@ -130,8 +157,8 @@ spec:
           # l'agent tourne. C'est la seule chose qu'un redémarrage de pod
           # pourrait réparer.
           #
-          # Elle ne doit PAS dépendre d'Ollama ni de Prometheus. Si elle
-          # l'on faisait, une panne d'Ollama redémarrerait l'agent en
+          # Elle ne doit PAS dépendre d'Ollama ni de Prometheus. Si c'était
+          # le cas, une panne d'Ollama redémarrerait l'agent en
           # boucle — sans rien réparer, puisque le redémarrage ne ferait
           # pas revenir Ollama. C'est exactement le défaut qu'on a observé
           # pendant le développement : l'agent redémarrait toutes les 30 s
@@ -147,7 +174,7 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
-          # La sonde de DISPONIBILITÉ (/ready) : vérifie que l'agent peut
+          # La sonde de DISPONIBILITÉ (/health) : vérifie que l'agent peut
           # réellement faire son travail, donc que ses dépendances
           # (Ollama, Prometheus, API Kubernetes) répondent.
           #
@@ -163,6 +190,12 @@ spec:
             periodSeconds: 15
             timeoutSeconds: 10
             failureThreshold: 2
+      volumes:
+        # Seul répertoire inscriptible du conteneur, pour les fichiers
+        # temporaires éventuels des bibliothèques.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
 ---
 # ---------------------------------------------------------------------------
 # 5. Service — l'adresse stable du webhook

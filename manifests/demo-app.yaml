@@ -25,6 +25,14 @@ spec:
       labels:
         app: demo-app
     spec:
+      # L'image tourne sous l'UID 1000 (USER du Dockerfile). runAsNonRoot
+      # fait refuser le pod par Kubernetes si l'image changeait pour root.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: demo-app
           # Tag local chargé dans le nœud kind via `make build`.
@@ -36,6 +44,18 @@ spec:
           ports:
             - name: http
               containerPort: 8000
+          # Aucun privilège : pas de capacité Linux, pas d'élévation, et un
+          # système de fichiers en lecture seule. Le seul répertoire
+          # inscriptible est /tmp, où waitress peut mettre en tampon les
+          # corps de requête volumineux.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           # Les limites de ressources sont au cœur du projet : c'est
           # l'illustration même de l'auto-guérison de l'étape 4.
           #
@@ -76,6 +96,13 @@ spec:
       # Pas strictement nécessaire ici (l'app meurt brutalement sur /crash),
       # mais c'est la bonne pratique sur un vrai workload.
       terminationGracePeriodSeconds: 10
+      volumes:
+        # emptyDir sur disque, pas en mémoire (medium: Memory) : un tmpfs
+        # serait compté dans la limite de 128Mi et fausserait le scénario
+        # /oom.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
 ---
 apiVersion: v1
 kind: Service

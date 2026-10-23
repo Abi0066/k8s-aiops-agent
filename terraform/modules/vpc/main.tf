@@ -1,5 +1,8 @@
 # Module VPC - Multi-AZ résilient avec sous-réseaux publics et privés séparés.
-# Deux NAT Gateways (une par AZ) pour éliminer le point de défaillance unique.
+# Une NAT Gateway par AZ pour éliminer le point de défaillance unique.
+#
+# Le nombre d'AZ vient de var.az_count : il était écrit en dur (`count = 2`)
+# dans six ressources, qu'il fallait garder synchronisées à la main.
 
 # 1. VPC Principal
 resource "aws_vpc" "main" {
@@ -28,7 +31,7 @@ data "aws_availability_zones" "available" {
 
 # 3. Sous-réseaux Publics (Multi-AZ)
 resource "aws_subnet" "public" {
-  count                   = 2
+  count                   = var.az_count
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
   availability_zone       = data.aws_availability_zones.available.names[count.index]
@@ -41,7 +44,7 @@ resource "aws_subnet" "public" {
 
 # 4. Sous-réseaux Privés (Multi-AZ)
 resource "aws_subnet" "private" {
-  count                   = 2
+  count                   = var.az_count
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index + 10)
   availability_zone       = data.aws_availability_zones.available.names[count.index]
@@ -54,7 +57,7 @@ resource "aws_subnet" "private" {
 
 # 5. Elastic IPs et NAT Gateways (Une par AZ pour la Haute Disponibilité)
 resource "aws_eip" "nat" {
-  count      = 2
+  count      = var.az_count
   domain     = "vpc"
   depends_on = [aws_internet_gateway.igw]
 
@@ -64,7 +67,7 @@ resource "aws_eip" "nat" {
 }
 
 resource "aws_nat_gateway" "nat" {
-  count         = 2
+  count         = var.az_count
   allocation_id = aws_eip.nat[count.index].id
   subnet_id     = aws_subnet.public[count.index].id
 
@@ -88,7 +91,7 @@ resource "aws_route_table" "public" {
 }
 
 resource "aws_route_table" "private" {
-  count  = 2
+  count  = var.az_count
   vpc_id = aws_vpc.main.id
 
   route {
@@ -103,13 +106,13 @@ resource "aws_route_table" "private" {
 
 # 7. Associations des tables de routage
 resource "aws_route_table_association" "public" {
-  count          = 2
+  count          = var.az_count
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
 }
 
 resource "aws_route_table_association" "private" {
-  count          = 2
+  count          = var.az_count
   subnet_id      = aws_subnet.private[count.index].id
   route_table_id = aws_route_table.private[count.index].id
 }
