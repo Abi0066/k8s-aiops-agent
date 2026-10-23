@@ -13,6 +13,7 @@ from app.collector import (
     collect_metrics,
     extract_last_termination,
     find_target_pod,
+    summarize_pod_status,
 )
 from app.models import Alert
 
@@ -110,6 +111,53 @@ def test_extract_last_termination_reads_previous_crash():
     assert result["reason"] == "OOMKilled"
     assert result["exitCode"] == 137
     assert result["restartCount"] == 3
+
+
+def test_summarize_pod_status_reads_resources_from_status_or_spec():
+    # Le client Kubernetes donne requests et limits sous forme de dict.
+    def resources(memory):
+        return NS(requests={"cpu": "50m"}, limits={"memory": memory})
+
+    def status(name, res):
+        return NS(
+            name=name,
+            image="img",
+            ready=True,
+            restart_count=0,
+            state=NS(running=NS(), waiting=None, terminated=None),
+            resources=res,
+        )
+
+    pod = NS(
+        metadata=NS(name="p"),
+        spec=NS(
+            node_name="n",
+            restart_policy="Always",
+            service_account_name="default",
+            # Ordre différent de containerStatuses : la spec se lit par nom.
+            containers=[
+                NS(name="sidecar", resources=resources("128Mi")),
+                NS(name="app", resources=resources("64Mi")),
+            ],
+        ),
+        status=NS(
+            phase="Running",
+            pod_ip="10.0.0.1",
+            qos_class="Burstable",
+            container_statuses=[
+                # Cluster < 1.33 ou conteneur pas encore démarré.
+                status("app", None),
+                # Redimensionné en place : le statut fait foi, pas la spec.
+                status("sidecar", resources("192Mi")),
+            ],
+        ),
+    )
+    containers = summarize_pod_status(pod)["containers"]
+    assert containers[0]["resources"] == {
+        "requests": {"cpu": "50m"},
+        "limits": {"memory": "64Mi"},
+    }
+    assert containers[1]["resources"]["limits"] == {"memory": "192Mi"}
 
 
 def test_prompt_context_lists_collection_errors():

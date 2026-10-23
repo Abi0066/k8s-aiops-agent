@@ -413,23 +413,52 @@ def summarize_pod_status(pod) -> Dict[str, Any]:
                     if cs.state and cs.state.terminated
                     else None
                 ),
-                "resources": {
-                    "requests": _resource_dict(cs.resources.requests),
-                    "limits": _resource_dict(cs.resources.limits),
-                },
+                "resources": _container_resources(cs, pod.spec.containers),
             }
             for cs in (pod.status.container_statuses or [])
         ],
     }
 
 
+def _container_resources(cs, spec_containers) -> Dict[str, Dict[str, str]]:
+    """Requests et limits d'un conteneur, lues dans son statut ou sa spec.
+
+    `containerStatuses[].resources` n'est rempli que depuis Kubernetes 1.33
+    (redimensionnement en place, InPlacePodVerticalScaling). Il vaut None
+    sur un cluster plus ancien, pour un conteneur pas encore démarré ou
+    dans un pod construit par un test. Lire `.requests` dessus lèverait
+    AttributeError, et l'agent n'écrirait jamais son diagnostic.
+
+    Le statut reste prioritaire : après un redimensionnement, il donne ce
+    que le conteneur a réellement, alors que la spec peut être en avance.
+    À défaut, on prend la spec du conteneur de même nom (l'ordre des deux
+    listes n'est pas garanti). C'est mieux qu'un champ vide : la limite
+    de mémoire est justement ce qu'on compare à la conso sur un OOMKill.
+    """
+    resources = cs.resources
+    if resources is None:
+        spec = next((c for c in (spec_containers or []) if c.name == cs.name), None)
+        resources = spec.resources if spec else None
+    if resources is None:
+        return {"requests": {}, "limits": {}}
+    return {
+        "requests": _resource_dict(resources.requests),
+        "limits": _resource_dict(resources.limits),
+    }
+
+
 def _resource_dict(resources) -> Dict[str, str]:
-    """Convertit un objet de ressources Kubernetes en dict simple."""
+    """Convertit les requests ou limits d'un conteneur en dict simple.
+
+    Le client Kubernetes les donne déjà sous forme de dict
+    (`{"memory": "128Mi"}`), pas d'objet : un `getattr` renverrait None
+    pour chaque clé, et les limites disparaîtraient en silence.
+    """
     if not resources:
         return {}
     out = {}
     for key in ("cpu", "memory"):
-        value = getattr(resources, key, None)
+        value = resources.get(key)
         if value is not None:
             out[key] = str(value)
     return out
