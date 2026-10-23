@@ -61,7 +61,19 @@ def make_pod(name="demo-app-7d9f8c6b5-abcde", rs="demo-app-7d9f8c6b5", owner_kin
             labels={"app": "demo-app", "pod-template-hash": "7d9f8c6b5"},
             owner_references=[NS(kind=owner_kind, name=rs, controller=True)],
         ),
-        spec=NS(node_name="node", restart_policy="Always", service_account_name="default"),
+        # `containers` est obligatoire dans une vraie PodSpec, et le collecteur
+        # y lit les limites quand le statut du conteneur ne les donne pas.
+        spec=NS(
+            node_name="node",
+            restart_policy="Always",
+            service_account_name="default",
+            containers=[
+                NS(
+                    name="demo-app",
+                    resources=NS(requests={"memory": "64Mi"}, limits={"memory": "128Mi"}),
+                )
+            ],
+        ),
         status=NS(phase="Running", pod_ip="10.0.0.1", qos_class="Burstable",
                   container_statuses=[container]),
     )
