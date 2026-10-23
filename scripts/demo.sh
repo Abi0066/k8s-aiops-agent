@@ -6,18 +6,16 @@
 #   crash : le process se termine (exit 1)      -> CrashLoopBackOff
 #   oom   : le kernel tue le process (OOMKill)  -> OOMKilled
 #
-# Le script affiche ensuite l'etat du pod et ses derniers evenements, ce qui
-# correspond exactement a ce que l'agent IA de l'etape 3 devra interroger.
+# Le script affiche ensuite l'état du pod et ses derniers événements : ce
+# sont les mêmes informations que l'agent IA (étape 3) collecte pour son
+# diagnostic.
 #
 set -euo pipefail
+# shellcheck source=scripts/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-NAMESPACE="aiops"
 APP_URL="http://localhost:30090"
 SCENARIO="${1:-crash}"
-
-log()  { printf '\033[0;36m[demo]\033[0m %s\n' "$*"; }
-warn() { printf '\033[0;33m[demo]\033[0m %s\n' "$*"; }
-die()  { printf '\033[0;31m[demo]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Nombre de déclenchements pour le scénario crash.
 #
@@ -66,7 +64,7 @@ case "$SCENARIO" in
                 warn "  le pod ne redevient pas Ready — abandon."
                 break
             fi
-            printf " pret, crash... "
+            printf " prêt, crash... "
             # On ignore le code de retour : la connexion sera coupée, c'est
             # précisément ce qui prouve que le process est mort.
             curl -s -m 10 "$APP_URL/crash" >/dev/null 2>&1 || true
@@ -100,7 +98,7 @@ echo
 log "============================================================"
 log " Événements récents du pod"
 log "============================================================"
-# Les événements expliquent CE QUI S'EST PASSE : "Back-off restarting failed
+# Les événements expliquent CE QUI S'EST PASSÉ : "Back-off restarting failed
 # container" pour un crash, "OOMKilled" pour un dépassement mémoire.
 kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp 2>/dev/null | tail -15
 

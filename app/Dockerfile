@@ -5,9 +5,16 @@
 
 FROM python:3.12-slim
 
+# PYTHONUNBUFFERED : les logs sortent immédiatement, sans attendre qu'un
+# tampon se remplisse — indispensable pour `kubectl logs` en direct.
+# PYTHONDONTWRITEBYTECODE : pas de fichiers .pyc ; /app n'est de toute façon
+# pas modifiable par l'utilisateur qui exécute le process.
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 # On ne lance pas le process en root : le runtime Kubernetes peut le refuser
 # via PodSecurityContext, et un process non-root réduit la surface d'attaque.
-RUN useradd --create-home --uid 1000 appuser
+RUN useradd --no-create-home --uid 1000 --shell /usr/sbin/nologin appuser
 
 WORKDIR /app
 
@@ -19,9 +26,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
 
-# L'utilisateur non-root doit posséder le répertoire de travail.
-RUN chown -R appuser:appuser /app
-USER appuser
+# Le code reste la propriété de root : appuser peut le lire et l'exécuter,
+# mais pas le modifier. Un `chown -R` ici dupliquerait en plus tous les
+# fichiers dans une nouvelle couche de l'image.
+#
+# L'UID est numérique (et non `USER appuser`) : avec `runAsNonRoot: true`,
+# le kubelet refuse de démarrer un conteneur dont il ne peut pas vérifier
+# que l'utilisateur n'est pas root, ce qu'un nom ne permet pas.
+USER 1000:1000
 
 EXPOSE 8000
 
@@ -33,8 +45,8 @@ EXPOSE 8000
 # gunicorn est un superviseur : le PID 1 est le master, et les workers sont des
 # enfants. Or notre endpoint /crash appelle os._exit(1) pour simuler un crash
 # applicatif. Avec gunicorn, cela ne tuerait QUE le worker ayant servi la
-# requete ; le master constaterait sa mort et en démarrerait un autre. Le
-# conteneur ne mourrait jamais, le pod ne redemarrerait pas, et l'incident
+# requête ; le master constaterait sa mort et en démarrerait un autre. Le
+# conteneur ne mourrait jamais, le pod ne redémarrerait pas, et l'incident
 # serait totalement invisible -- c'est exactement ce qui a été observé pendant
 # le développement de ce projet.
 #

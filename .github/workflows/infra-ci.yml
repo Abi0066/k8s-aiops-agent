@@ -1,0 +1,70 @@
+# CI de l'infrastructure : scripts, Dockerfiles, monitoring, manifests
+# Kubernetes et Terraform.
+#
+# Le job `validate` lance le même script que `make validate` : un échec de la
+# CI se reproduit à l'identique en local. Chaque outil tourne dans un
+# conteneur à version épinglée ; le runner GitHub fournit docker.
+#
+# Le job `images` construit les deux images, comme `make build` : un
+# Dockerfile cassé est détecté avant d'arriver sur la branche principale.
+# L'app de démo est ensuite démarrée avec le durcissement de son manifest.
+
+name: infra-ci
+
+on:
+  push:
+    branches: [main]
+    paths: &infra-paths
+      - "scripts/**"
+      - "manifests/**"
+      - "monitoring/**"
+      - "terraform/**"
+      - "app/**"
+      - "agent/Dockerfile"
+      - "agent/.dockerignore"
+      - "agent/requirements.txt"
+      - "kind-config.yaml"
+      - ".github/workflows/infra-ci.yml"
+  pull_request:
+    paths: *infra-paths
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Le runner a podman ET docker : on choisit docker, le runtime de
+      # référence sur GitHub Actions.
+      - name: Vérifications (make validate)
+        run: ./scripts/validate.sh
+        env:
+          CONTAINER_RUNTIME: docker
+
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        context: [app, agent]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construction de l'image (${{ matrix.context }})
+        run: docker build -t "aiops-${{ matrix.context }}:ci" "${{ matrix.context }}"
+
+      # L'app de démo doit démarrer avec le durcissement de son manifest
+      # (racine en lecture seule, UID 1000, aucune capability), répondre, puis
+      # s'arrêter sur SIGTERM avec le code 0. Sans handler, son PID 1 ignore
+      # SIGTERM et finit tué par SIGKILL : code 137, celui d'un OOM.
+      - name: Démarrage durci et arrêt propre (app)
+        if: matrix.context == 'app'
+        run: |
+          docker run -d --name app -p 8000:8000 --read-only --tmpfs /tmp \
+            --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges \
+            aiops-app:ci
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 1 http://127.0.0.1:8000/health
+          docker stop --time 5 app
+          test "$(docker inspect --format '{{.State.ExitCode}}' app)" -eq 0

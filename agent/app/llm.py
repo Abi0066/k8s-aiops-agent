@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 #     preuves fournies ;
 #   - une consigne explicite sur le non diagnostic d'alertes résolues.
 SYSTEM_PROMPT = """\
-Tu es un analyste d'incidents Kubernetes (SRE) experimenté. On te fournit des \
+Tu es un analyste d'incidents Kubernetes (SRE) expérimenté. On te fournit des \
 preuves brutes extraites d'un cluster Kubernetes : état du pod, logs, \
 événements, métriques Prometheus.
 
@@ -114,14 +114,15 @@ async def call_ollama(
       les mêmes preuves peuvent donner des conclusions différentes — donc
       des actions différentes en étape 4.
 
-    - **`num_ctx`** — taille de la fenêtre de contexte. 4096 tokens est la
-      valeur par défaut de qwen2.5-coder:14b. Les preuves sont déjà tronquées en
-      amont (module `collector`) pour tenir dans cette limite.
+    - **`num_ctx`** — taille de la fenêtre de contexte, fixée explicitement
+      à 4096 tokens : la valeur par défaut dépend de la version d'Ollama.
+      Les preuves sont déjà tronquées en amont (module `collector`) pour
+      tenir dans cette limite.
 
-    Le timeout est long (300 s) : un modèle 3B sur CPU peut prendre 30 à
-    90 s pour la première inférence (chargement en mémoire), et le
-    téléchargement du modèle au premier démarrage peut en prendre bien
-    plus. Le `num_predict` limite la longueur générée.
+    Le timeout est long (300 s) : un modèle de 14 milliards de paramètres
+    sur CPU peut prendre 30 à 90 s par inférence, davantage la première fois
+    (chargement du modèle en mémoire). Le `num_predict` limite la longueur
+    générée, donc la durée.
     """
     payload = {
         "model": model,

@@ -1,0 +1,74 @@
+# Tests unitaires des règles d'alerte, exécutés par promtool :
+#
+#   promtool test rules monitoring/prometheus/tests/alerts_test.yaml
+#
+# promtool rejoue des séries temporelles fictives, évalue les règles comme le
+# ferait Prometheus, et compare les alertes obtenues à celles attendues
+# (labels ET annotations). Aucun cluster n'est nécessaire : c'est ce qui
+# permet de vérifier les règles dans la CI.
+#
+# On teste ici ce que l'agent et Alertmanager consomment : les labels qui
+# servent au routage et à l'inhibition, et les annotations que lit l'agent.
+
+rule_files:
+  - ../rules/alerts.yaml
+
+evaluation_interval: 15s
+
+tests:
+  # Un CrashLoopBackOff doit nommer le pod fautif : c'est l'annotation
+  # `pod_name` qui dit à l'agent quel pod inspecter.
+  - name: crash en boucle -> alerte avec le nom du pod
+    interval: 15s
+    input_series:
+      # Un redémarrage toutes les 15 s : 20 en 5 minutes, bien au-dessus du
+      # seuil de 3.
+      - series: 'kube_pod_container_status_restarts_total{namespace="aiops", pod="demo-app-7d4b9c-x2k8p", container="demo-app", job="kube-state-metrics"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DemoAppCrashLooping
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: demo-app
+              namespace: aiops
+              pod: demo-app-7d4b9c-x2k8p
+              container: demo-app
+              job: kube-state-metrics
+            exp_annotations:
+              summary: "L'application demo-app redémarre en boucle"
+              description: >-
+                Le conteneur demo-app dans le namespace aiops a redémarré plus de
+                3 fois en 5 minutes. Suspect : CrashLoopBackOff.
+              pod_name: demo-app-7d4b9c-x2k8p
+              namespace: aiops
+
+  # La latence élevée doit garder le namespace de l'application. La règle
+  # d'inhibition d'Alertmanager (equal: namespace, pod) le compare à celui de
+  # DemoAppDown : sans lui, l'alerte de latence n'est jamais masquée quand
+  # l'application est tombée.
+  - name: latence élevée -> alerte qui garde le namespace
+    interval: 15s
+    input_series:
+      # Toutes les requêtes durent entre 0,5 s et 1 s : le 95e centile est
+      # au-dessus du seuil de 500 ms.
+      - series: 'demo_app_request_duration_seconds_bucket{job="demo-app", namespace="aiops", endpoint="slow", le="0.5"}'
+        values: '0x40'
+      - series: 'demo_app_request_duration_seconds_bucket{job="demo-app", namespace="aiops", endpoint="slow", le="1"}'
+        values: '0+10x40'
+      - series: 'demo_app_request_duration_seconds_bucket{job="demo-app", namespace="aiops", endpoint="slow", le="+Inf"}'
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: DemoAppHighLatency
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: demo-app
+              namespace: aiops
+            exp_annotations:
+              summary: "Latence élevée sur demo-app"
+              description: >-
+                Le 95e centile de latence de demo-app dépasse 500 ms depuis plus
+                de 3 minutes. Suspect : saturation CPU ou contention mémoire.

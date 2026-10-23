@@ -3,10 +3,12 @@
 # Différences avec l'image de l'application de démo (app/Dockerfile) :
 #   - le point d'entrée est uvicorn, pas python main.py ;
 #   - on n'installe PAS les dépendances de l'application de démo ;
-#   - le user non-root est NamedUser (Kubernetes 1.25+ le crée
-#     automatiquement si le UID n'existe pas dans /etc/passwd).
+#   - le code est un paquet (app/), pas un fichier unique.
 
 FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
 # ---------------------------------------------------------------------------
 # Utilisateur non-root
@@ -16,9 +18,8 @@ FROM python:3.12-slim
 # une faille dans une dépendance, il n'obtient pas root dans le conteneur.
 #
 # On fixe un UID explicite (1000) : le même que l'app de démo, pour la
-# cohérence du projet. Kubernetes peut monter un PVC seulement si le
-# processus a les bons droits sur le répertoire monté (problème classique
-# avec les volumes NFS et les groupes supplementationnaires).
+# cohérence du projet. Un UID fixe rend aussi les droits prévisibles le jour
+# où l'on monte un volume (fsGroup, propriétaire des fichiers).
 RUN groupadd --gid 1000 appuser \
     && useradd --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin appuser
 
@@ -33,15 +34,18 @@ WORKDIR /app
 # projet qui itère beaucoup sur le code, ça fait gagner beaucoup de temps.
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+# Pas de `pip install --upgrade pip` : la version de pip ne serait plus
+# figée, et deux builds du même commit pourraient différer.
+RUN pip install --no-cache-dir -r requirements.txt
 
 # ---------------------------------------------------------------------------
 # Code
 # ---------------------------------------------------------------------------
 COPY app/ ./app/
 
-USER appuser
+# UID numérique : `runAsNonRoot: true` (voir manifests/aiops-agent.yaml)
+# exige que le kubelet puisse vérifier que l'utilisateur n'est pas root.
+USER 1000:1000
 
 EXPOSE 8080
 
@@ -53,16 +57,15 @@ EXPOSE 8080
 # --host 0.0.0.0 est obligatoire : uvicorn n'écoute par défaut que sur
 # 127.0.0.1, ce qui rendrait le service inaccessible depuis le cluster.
 #
-# --proxy-headers : le Service Kubernetes place l'IP réelle du client dans
-# l'en-tête X-Forwarded-For. Sans cette option, les logs de l'agent
-# montraient l'IP du proxy au lieu de celle d'Alertmanager.
+# Un seul processus uvicorn (le défaut, sans --workers) : l'anti-doublon des
+# alertes vit en mémoire dans le process. Avec plusieurs workers, chacun
+# aurait sa propre mémoire et la même alerte pourrait être analysée deux
+# fois. Le modèle, lui, tourne dans Ollama : il n'est pas chargé par worker.
 #
-# --workers 1 : un seul processus uvicorn. C'est le bon choix ici car les
-# requêtes de diagnostic sont longues (minutes) : plusieurs workers
-# multiplieraient la consommation mémoire (un modèle LLM chargé par
-# worker) sans gain réel. Pour une démo mono-utilisateur, un worker suffit.
+# Pas de --proxy-headers : un Service Kubernetes travaille au niveau TCP et
+# n'ajoute aucun en-tête X-Forwarded-For. Il n'y a pas de proxy HTTP devant
+# l'agent.
 CMD ["uvicorn", "app.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8080", \
-     "--proxy-headers", \
      "--log-level", "info"]

@@ -15,7 +15,7 @@ CLUSTER_NAME ?= k8s-aiops
 NAMESPACE    ?= aiops
 
 .PHONY: help setup cluster-up cluster-down build demo-crash demo-oom \
-        status logs ports clean-images agent-logs agent-health test lint
+        status logs ports clean-images agent-logs agent-health test lint validate
 
 ## help : affiche cette aide
 help:
@@ -27,7 +27,7 @@ help:
 	@echo "  Démarrage rapide :"
 	@echo "    make setup        # installe kind + kubectl"
 	@echo "    make build        # construit les images"
-	@echo "    make cluster-up   # crée le cluster et déploie tout"
+	@echo "    make cluster-up   # crée le cluster, y charge les images, déploie tout"
 	@echo "    make demo-crash   # provoque un incident de démonstration"
 	@echo ""
 
@@ -35,7 +35,7 @@ help:
 setup:
 	@./scripts/setup.sh
 
-## cluster-up : crée le cluster kind et déploie l'étape 1
+## cluster-up : crée le cluster kind et déploie les étapes 1 à 3
 cluster-up:
 	@./scripts/cluster-up.sh
 
@@ -43,7 +43,7 @@ cluster-up:
 cluster-down:
 	@./scripts/cluster-down.sh
 
-## build : construit les images et les charge dans le cluster
+## build : construit les images (et les recharge si le cluster existe)
 build:
 	@./scripts/build-images.sh
 
@@ -75,10 +75,15 @@ agent-logs:
 	@kubectl -n $(NAMESPACE) logs -l app=aiops-agent -f --prefix
 
 ## agent-health : état de l'agent et de ses dépendances (Ollama, Prometheus)
+# /health répond 503 quand une dépendance est en panne : c'est justement là
+# qu'on veut lire le détail. http.client renvoie le corps quel que soit le
+# code, là où urllib.urlopen lèverait une exception sans l'afficher.
 agent-health:
 	@kubectl -n $(NAMESPACE) exec deploy/aiops-agent -- \
-		python3 -c "import urllib.request,sys; \
-		sys.stdout.write(urllib.request.urlopen('http://localhost:8080/health').read().decode())"
+		python3 -c "import http.client,sys; \
+		c = http.client.HTTPConnection('localhost', 8080, timeout=10); \
+		c.request('GET', '/health'); r = c.getresponse(); \
+		print(r.status, r.read().decode()); sys.exit(r.status != 200)"
 
 ## ports : affiche les URL d'accès aux services
 ports:
@@ -96,10 +101,16 @@ ports:
 test:
 	@cd agent && python3 -m pytest -q
 
-## lint : vérifie le code de l'agent avec ruff
+## lint : vérifie le code Python (agent et application) avec ruff
+# Lancé depuis agent/ : l'application n'a pas de configuration ruff propre,
+# elle hérite donc de agent/pyproject.toml.
 lint:
-	@cd agent && python3 -m ruff check .
+	@cd agent && python3 -m ruff check . ../app
 
-## clean-images : supprime les images locales du projet (régénérables)
+## validate : vérifie scripts, Dockerfiles, Prometheus, Alertmanager, manifests et Terraform
+validate:
+	@./scripts/validate.sh
+
+## clean-images : comme cluster-down, et supprime aussi les images du projet
 clean-images:
 	@./scripts/cluster-down.sh --images

@@ -7,7 +7,13 @@ cluster pour vérifier la logique de sélection du pod.
 import asyncio
 from types import SimpleNamespace as NS
 
-from app.collector import Evidence, extract_last_termination, find_target_pod
+from app.collector import (
+    Evidence,
+    collect_events,
+    collect_metrics,
+    extract_last_termination,
+    find_target_pod,
+)
 from app.models import Alert
 
 
@@ -26,17 +32,31 @@ def make_pod(name, labels=None, phase="Running", waiting=None, terminated=None):
 
 
 class FakeCoreV1:
-    def __init__(self, pods):
-        self.pods = pods
+    """Imite les quelques méthodes de CoreV1Api que lit le collecteur.
 
-    async def read_namespaced_pod(self, name, namespace):
+    Comme le serveur d'API, `list_namespaced_event` applique le
+    `field_selector` `involvedObject.name=...`.
+    """
+
+    def __init__(self, pods=(), events=()):
+        self.pods = list(pods)
+        self.events = list(events)
+
+    async def read_namespaced_pod(self, name, namespace, **_):
         for pod in self.pods:
             if pod.metadata.name == name:
                 return pod
         raise LookupError(name)
 
-    async def list_namespaced_pod(self, namespace):
+    async def list_namespaced_pod(self, namespace, **_):
         return NS(items=self.pods)
+
+    async def list_namespaced_event(self, namespace, field_selector=None, **_):
+        items = self.events
+        if field_selector:
+            wanted = field_selector.removeprefix("involvedObject.name=")
+            items = [e for e in items if e.involved_object.name == wanted]
+        return NS(items=items)
 
 
 def find(pods, alert):
@@ -97,3 +117,84 @@ def test_prompt_context_lists_collection_errors():
     context = evidence.to_prompt_context()
     assert "ALERTE : DemoAppDown" in context
     assert "  - aucun pod" in context
+
+
+def make_event(obj_name, reason, timestamp):
+    return NS(
+        type="Warning",
+        reason=reason,
+        message=f"{reason} on {obj_name}",
+        involved_object=NS(kind="Pod", name=obj_name),
+        count=1,
+        last_timestamp=timestamp,
+        event_time=None,
+    )
+
+
+def events_for(pod_name, events):
+    evidence = Evidence()
+    asyncio.run(collect_events(FakeCoreV1(events=events), "aiops", evidence, pod_name))
+    return evidence.events
+
+
+def test_events_are_restricted_to_the_target_pod():
+    # Les événements des autres pods ne doivent pas occuper les places du prompt.
+    events = [
+        make_event("grafana-1", "Unhealthy", "2026-01-01T10:05:00"),
+        make_event("demo-app-1", "BackOff", "2026-01-01T10:00:00"),
+    ]
+    assert [e["object"] for e in events_for("demo-app-1", events)] == ["Pod/demo-app-1"]
+
+
+def test_events_fall_back_to_namespace_when_pod_has_none():
+    events = [make_event("demo-app-rs", "FailedCreate", "2026-01-01T10:00:00")]
+    assert [e["reason"] for e in events_for("demo-app-new", events)] == ["FailedCreate"]
+
+
+class FakePrometheus:
+    """Client HTTP minimal : enregistre les requêtes PromQL reçues."""
+
+    def __init__(self, fail_on=None):
+        self.queries = []
+        self.fail_on = fail_on
+
+    async def get(self, url, params, timeout):
+        query = params["query"]
+        self.queries.append(query)
+        if self.fail_on and self.fail_on in query:
+            raise RuntimeError("prometheus down")
+        series = [{"metric": {"pod": "demo-app-1", "__name__": "x"}, "value": [0, "4"]}]
+        return NS(raise_for_status=lambda: None, json=lambda: {"data": {"result": series}})
+
+
+def test_metrics_are_scoped_to_the_target_pod():
+    prom = FakePrometheus()
+    evidence = Evidence()
+    asyncio.run(collect_metrics(prom, "http://prom", "aiops", evidence, "demo-app-1"))
+
+    restarts = next(q for q in prom.queries if "restarts_total" in q)
+    assert 'namespace="aiops",pod="demo-app-1"' in restarts
+    # `up` décrit une cible de scrape, il n'a pas de label pod.
+    assert 'up{namespace="aiops"}' in prom.queries
+    # Les labels inutiles (__name__) sont retirés du prompt.
+    assert evidence.metrics["restarts"]["result"] == [
+        {"labels": {"pod": "demo-app-1"}, "value": "4"}
+    ]
+
+
+def test_metrics_escape_label_values_from_the_alert():
+    # Le namespace vient du payload de l'alerte : un `"` ne doit pas fermer
+    # la chaîne PromQL.
+    prom = FakePrometheus()
+    asyncio.run(collect_metrics(prom, "http://prom", 'a"} or vector(1) #', Evidence()))
+    assert 'up{namespace="a\\"} or vector(1) #"}' in prom.queries
+
+
+def test_failed_metric_is_reported_and_others_are_kept():
+    prom = FakePrometheus(fail_on="working_set")
+    evidence = Evidence()
+    asyncio.run(collect_metrics(prom, "http://prom", "aiops", evidence, "demo-app-1"))
+
+    assert "memory_working_set_max_15m" not in evidence.metrics
+    assert "restarts" in evidence.metrics
+    assert any("memory_working_set_max_15m" in e for e in evidence.errors)

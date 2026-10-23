@@ -1,4 +1,6 @@
 # CI de l'agent IA : lint + tests unitaires à chaque push et pull request.
+# Le lint couvre aussi l'application de démonstration (app/), qui suit la
+# même configuration ruff.
 #
 # Les tests n'ont besoin d'aucun cluster : Kubernetes, Prometheus et
 # Ollama sont remplacés par de faux clients. La CI reste donc rapide
@@ -9,9 +11,9 @@ name: agent-ci
 on:
   push:
     branches: [main]
-    paths: ["agent/**", ".github/workflows/agent-ci.yml"]
+    paths: ["agent/**", "app/**", ".github/workflows/agent-ci.yml"]
   pull_request:
-    paths: ["agent/**", ".github/workflows/agent-ci.yml"]
+    paths: ["agent/**", "app/**", ".github/workflows/agent-ci.yml"]
 
 permissions:
   contents: read
@@ -38,7 +40,7 @@ jobs:
         run: pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Lint (ruff)
-        run: ruff check .
+        run: ruff check . ../app
 
       - name: Tests (pytest)
         run: pytest -q

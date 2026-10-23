@@ -3,26 +3,21 @@
 # cluster-down.sh — Détruit le cluster kind et nettoie les ressources locales.
 #
 # L'objectif de ce script est qu'un `make cluster-down` laisse la machine
-# dans l'état où l'on avait tout démarré : pas de conteneur, pas de réseau
-# Podman, pas de volume, pas d'image construite pour le projet.
+# dans l'état où l'on avait tout démarré : pas de conteneur, pas de réseau,
+# pas de volume. Avec --images (make clean-images), les images construites
+# pour le projet sont aussi supprimées.
 #
 set -euo pipefail
-
-CLUSTER_NAME="k8s-aiops"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"
 
-log()  { printf '\033[0;36m[cluster-down]\033[0m %s\n' "$*"; }
-warn() { printf '\033[0;33m[cluster-down]\033[0m %s\n' "$*"; }
-
-if command -v podman >/dev/null 2>&1; then
-    export KIND_EXPERIMENTAL_PROVIDER=podman
-fi
+detect_runtime
 
 # ---------------------------------------------------------------------------
 # 1. Suppression du cluster kind
 # ---------------------------------------------------------------------------
-if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
+if cluster_exists; then
     log "Suppression du cluster '$CLUSTER_NAME'..."
     kind delete cluster --name "$CLUSTER_NAME"
     log "Cluster supprimé."
@@ -31,28 +26,29 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Nettoyage des ressources Podman
+# 2. Nettoyage du réseau
 # ---------------------------------------------------------------------------
-# kind utilise un réseau dédié ("kind") et des volumes pour le stockage du
-# nœud. Ils sont normalement supprimés avec le cluster, mais une creation
-# interrompue peut en laisser.
-if command -v podman >/dev/null 2>&1; then
-    if podman network exists kind 2>/dev/null; then
-        log "Suppression du réseau Podman 'kind'..."
-        podman network rm kind 2>/dev/null || warn "Réseau 'kind' non supprimé (peut-être utilisé)."
-    fi
+# kind crée un réseau dédié ("kind") et ne le supprime pas avec le cluster.
+# S'il sert encore à un autre cluster kind, la suppression échoue et on le
+# laisse en place.
+if "$RUNTIME" network inspect kind >/dev/null 2>&1; then
+    log "Suppression du réseau 'kind'..."
+    "$RUNTIME" network rm kind >/dev/null 2>&1 \
+        || warn "Réseau 'kind' non supprimé (utilisé par un autre cluster ?)."
 fi
 
 # ---------------------------------------------------------------------------
 # 3. Nettoyage des images locales du projet
 # ---------------------------------------------------------------------------
-# Option --images : supprime aussi les images Docker/Podman du projet.
-# Elles sont régénérables avec `make build`, donc les supprimer est sans risque.
-if [[ "${1:-}" == "--images" ]] && command -v podman >/dev/null 2>&1; then
+# Option --images (make clean-images) : supprime aussi les deux images
+# construites par le projet. Elles sont régénérables avec `make build`, donc
+# les supprimer est sans risque. Les images publiques (Prometheus, Ollama...)
+# restent sur l'hôte : les retélécharger coûterait plusieurs Go.
+if [[ "${1:-}" == "--images" ]]; then
     log "Suppression des images locales du projet..."
-    for image in localhost/demo-app:1.0.3 localhost/aiops-agent:1.0.0; do
-        if podman image exists "$image" 2>/dev/null; then
-            podman rmi "$image" 2>/dev/null && log "  supprimée : $image"
+    for image in "$DEMO_APP_IMAGE" "$AGENT_IMAGE"; do
+        if "$RUNTIME" image inspect "$image" >/dev/null 2>&1; then
+            "$RUNTIME" rmi "$image" >/dev/null && log "  supprimée : $image"
         fi
     done
 fi
@@ -60,4 +56,5 @@ fi
 echo
 log "Nettoyage terminé."
 log "Le cluster, le réseau et (optionnellement) les images du projet sont supprimés."
-log "Ollama et ses modèles ne sont PAS touchés : ils servent aussi à l'agent IA."
+log "Le modèle d'Ollama vivait dans un volume du cluster : il est supprimé avec"
+log "lui et sera retéléchargé (~9 Go) au prochain 'make cluster-up'."
