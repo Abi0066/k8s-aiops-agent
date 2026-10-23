@@ -20,6 +20,13 @@ Flux général
      (pod, logs, events)     (redémarrages, exit code)   /api/chat
                                         │
                                         ▼
+                            verdict déterministe (code)
+                                        │
+                                        ▼
+                    action corrective, décidée par le code
+                     (OOMKilled certain : limite mémoire relevée)
+                                        │
+                                        ▼
                             cause racine en 3 phrases,
                                     loggée
 """
@@ -52,6 +59,12 @@ from .collector import (
 from .diagnosis import diagnose, format_verdict_for_prompt
 from .llm import call_ollama, check_ollama_health
 from .models import Alert, AlertGroup
+from .remediation import (
+    AutohealConfig,
+    build_apps_client,
+    format_remediation_for_prompt,
+    remediate,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -84,6 +97,12 @@ LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "300"))
 # une alerte déjà diagnostiquée repartirait pour 30 à 90 s d'inférence.
 DEDUP_WINDOW_S = float(os.environ.get("DEDUP_WINDOW_S", "600"))
 
+# Auto-guérison (étape 4) : désactivée et en dry-run par défaut. Lue ici,
+# au chargement du module : une valeur invalide (facteur <= 1, plafond
+# illisible) fait échouer le démarrage du pod au lieu du premier incident.
+# Détail des garde-fous dans le module `remediation`.
+AUTOHEAL = AutohealConfig.from_env()
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -101,6 +120,7 @@ log = logging.getLogger("aiops-agent")
 # Les clients sont créés au démarrage (lifespan) et partagés : les recréer
 # à chaque requête serait coûteux (nouvelle connexion TLS à chaque fois).
 core_v1 = None
+apps_v1 = None
 http_client: httpx.AsyncClient | None = None
 
 # Empreintes des alertes récemment prises en charge -> instant (monotonic).
@@ -121,14 +141,16 @@ async def lifespan(_app: FastAPI):
     `lifespan` remplace `@app.on_event("startup"/"shutdown")`, déprécié
     par FastAPI.
     """
-    global core_v1, http_client
+    global core_v1, apps_v1, http_client
 
     log.info("Démarrage de l'agent IA")
     log.info("  Ollama     : %s (modèle : %s)", OLLAMA_URL, OLLAMA_MODEL)
     log.info("  Prometheus : %s", PROMETHEUS_URL)
     log.info("  Namespace  : %s", WATCHED_NAMESPACE)
+    log.info("  Auto-guérison : %s", AUTOHEAL.describe())
 
     core_v1 = await build_k8s_client()
+    apps_v1 = build_apps_client(core_v1)
 
     # timeout=None pour httpx : le timeout par défaut (5 s) est trop court
     # pour l'appel au LLM, qui peut prendre une minute. On gère donc les
@@ -506,7 +528,19 @@ async def analyze_one_alert(alert: Alert) -> None:
     verdict_block = format_verdict_for_prompt(verdict)
     log.info("Verdict déterministe :\n%s", verdict_block)
 
-    # --- 4. Diagnostic rédigé par le LLM ------------------------------
+    # --- 4. Action corrective, décidée par le code --------------------
+    # Le code choisit l'action à partir du verdict, jamais à partir du
+    # texte du LLM. Elle passe AVANT l'appel au LLM, pour deux raisons :
+    # la correction n'attend pas 30 à 90 s d'inférence, et elle a lieu
+    # même si Ollama est en panne. Le LLM reçoit ensuite la décision prise,
+    # pour l'expliquer.
+    container = (evidence.last_termination or {}).get("container")
+    action = await remediate(apps_v1, pod, verdict, container, AUTOHEAL)
+    if action is not None:
+        log.info("Auto-guérison : %s", json.dumps(action, ensure_ascii=False))
+        verdict_block += "\n\n" + format_remediation_for_prompt(action)
+
+    # --- 5. Diagnostic rédigé par le LLM ------------------------------
     context = evidence.to_prompt_context()
     log.info(
         "Preuves collectées (%d caractères) :\n%s",
@@ -528,7 +562,7 @@ async def analyze_one_alert(alert: Alert) -> None:
 
     elapsed = (datetime.now(timezone.utc) - started).total_seconds()
 
-    # --- 5. Journalisation du résultat --------------------------------
+    # --- 6. Journalisation du résultat --------------------------------
     log.info("-" * 70)
     if result.get("ok"):
         log.info(
@@ -569,6 +603,10 @@ async def analyze_one_alert(alert: Alert) -> None:
                     if verdict
                     else None
                 ),
+                # La décision d'auto-guérison, y compris « rien » (désactivée,
+                # bloquée par un garde-fou) : null si le verdict n'en appelle
+                # aucune.
+                "remediation": action,
                 "analysis": result.get("analysis"),
                 "llm_ok": result.get("ok"),
                 "llm_error": result.get("error"),

@@ -43,7 +43,7 @@ log = logging.getLogger(__name__)
 class Verdict:
     """Le verdict déterministe sur un incident.
 
-    `code` est une catégorie stable, utilisée par l'étape 4 pour choisir
+    `code` est une catégorie stable, utilisée par `remediation` pour choisir
     l'action corrective. `evidence` est le champ structuré qui a permis
     de décider — c'est la preuve que le verdict n'est pas une devinette.
     """
@@ -57,7 +57,8 @@ class Verdict:
     # Le champ qui a permis de décider (ex. "exitCode=1").
     evidence: str
 
-    # Action corrective recommandée (sera appliquée en étape 4).
+    # Action corrective recommandée. Seul un OOMKilled certain est corrigé
+    # automatiquement (module `remediation`) ; les autres restent humaines.
     recommended_action: Optional[str] = None
 
     # Le niveau de confiance du code, pas du LLM.

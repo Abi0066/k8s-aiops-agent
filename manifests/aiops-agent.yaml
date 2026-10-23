@@ -38,6 +38,20 @@ metadata:
 # l'oublie donne une application qui démarre sans erreur et qui n'arrive
 # pas à lire un seul log : le diagnostic devient aveugle sans le moindre
 # message d'erreur. C'est le piège classique du RBAC Kubernetes.
+#
+# Le seul droit d'ÉCRITURE sert à l'auto-guérison (étape 4) : relever la
+# limite de mémoire d'un Deployment après un OOMKill.
+#   - get   : lire la limite actuelle et l'annotation de la dernière action ;
+#   - patch : modifier la limite. Pas de update (qui réécrit l'objet
+#             entier), pas de create ni de delete.
+#   - resourceNames : seul le Deployment demo-app est modifiable. L'agent ne
+#             peut ni toucher à Ollama ou Prometheus, ni à son propre
+#             Deployment. Pour soigner une autre application, ajouter son
+#             nom ici : sans cela, l'action échoue en 403, visible dans les
+#             logs (status « failed »).
+#
+# Le pod n'est pas lu via son ReplicaSet : le nom du Deployment est déduit
+# du nom du ReplicaSet, ce qui évite d'ajouter un droit sur les replicasets.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -49,6 +63,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "events", "pods/log"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["demo-app"]
+    verbs: ["get", "patch"]
 ---
 # ---------------------------------------------------------------------------
 # 3. RoleBinding — le lien entre l'identité et les droits
@@ -105,7 +123,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: aiops-agent
-          image: localhost/aiops-agent:1.0.0
+          image: localhost/aiops-agent:1.1.0
           imagePullPolicy: Never
           ports:
             - name: http
@@ -146,6 +164,27 @@ spec:
             # Alertmanager renvoie son groupe.
             - name: DEDUP_WINDOW_S
               value: "600"
+            # Auto-guérison (étape 4). Sans ces variables, elle est
+            # désactivée. Ici elle est activée en DRY-RUN : l'agent envoie
+            # son patch avec dryRun=All, le serveur d'API le valide (droits,
+            # schéma) sans rien enregistrer, et l'agent journalise ce qu'il
+            # AURAIT fait. Passer en mode réel est une décision humaine :
+            #   kubectl -n aiops set env deploy/aiops-agent AUTOHEAL_DRY_RUN=false
+            - name: AUTOHEAL_ENABLED
+              value: "true"
+            - name: AUTOHEAL_DRY_RUN
+              value: "true"
+            # Nouvelle limite = ancienne x 1,5, jamais au-delà du plafond :
+            # 128Mi -> 192Mi -> 288Mi -> 432Mi -> 512Mi, puis plus rien.
+            - name: AUTOHEAL_MEMORY_FACTOR
+              value: "1.5"
+            - name: AUTOHEAL_MEMORY_MAX
+              value: "512Mi"
+            # Une action par Deployment par heure au plus : si l'application
+            # est de nouveau tuée juste après, ce n'est plus une limite trop
+            # basse mais probablement une fuite, et c'est à un humain d'agir.
+            - name: AUTOHEAL_COOLDOWN_S
+              value: "3600"
           resources:
             requests:
               memory: "128Mi"

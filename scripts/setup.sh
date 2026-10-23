@@ -90,6 +90,22 @@ main() {
         log "br_netfilter chargé."
     fi
 
+    # Vérifie la limite d'instances inotify. containerd en ouvre une par
+    # conteneur pour être prévenu des OOMKill, sur un compteur partagé avec
+    # les autres programmes du même utilisateur. À 128 (valeur par défaut du
+    # noyau), il n'y arrive plus : un pod tué par manque de mémoire apparaît
+    # « Error » au lieu de « OOMKilled », et l'auto-guérison ne se déclenche pas.
+    local inotify_instances
+    inotify_instances=$(cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || echo 0)
+    if (( inotify_instances < 512 )); then
+        warn "fs.inotify.max_user_instances vaut ${inotify_instances} — les OOMKill seront vus comme « Error »."
+        warn "À exécuter avec les privilèges root :"
+        warn "    sudo sysctl -w fs.inotify.max_user_instances=512"
+        warn "    echo fs.inotify.max_user_instances=512 | sudo tee /etc/sysctl.d/99-kind.conf"
+    else
+        log "Limite inotify suffisante (${inotify_instances} instances)."
+    fi
+
     log "Setup terminé."
 }
 
