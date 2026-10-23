@@ -6,7 +6,8 @@
 #   Dockerfiles                -> hadolint
 #   Prometheus (config, règles d'alerte et leurs tests) -> promtool
 #   Alertmanager               -> amtool
-#   manifests Kubernetes       -> kubeconform (schéma de l'API, clés en double)
+#   manifests Kubernetes       -> kustomize build + kubeconform (schéma de
+#                                 l'API, clés en double), objets Flux compris
 #   modules Terraform          -> terraform fmt + validate
 #   workflows GitHub Actions   -> actionlint
 #
@@ -29,6 +30,7 @@ ALERTMANAGER_IMAGE="$(image_in monitoring/alertmanager/alertmanager-deployment.y
 SHELLCHECK_IMAGE="docker.io/koalaman/shellcheck:v0.11.0"
 HADOLINT_IMAGE="docker.io/hadolint/hadolint:v2.15.1"
 KUBECONFORM_IMAGE="ghcr.io/yannh/kubeconform:v0.8.0"
+KUSTOMIZE_IMAGE="registry.k8s.io/kustomize/kustomize:v5.8.2"
 TERRAFORM_IMAGE="docker.io/hashicorp/terraform:1.16.7"
 ACTIONLINT_IMAGE="docker.io/rhysd/actionlint:1.7.12"
 
@@ -70,12 +72,29 @@ check "promtool test rules" run --entrypoint promtool "$PROMETHEUS_IMAGE" \
 check "amtool check-config" run --entrypoint amtool "$ALERTMANAGER_IMAGE" \
     check-config monitoring/alertmanager/alertmanager.yaml
 
-# Les manifests Kubernetes sont les fichiers qui déclarent un `kind:`. Les
-# autres YAML (configuration Prometheus, provisioning Grafana) n'en sont pas.
+# On valide ce qui sera réellement appliqué : le rendu de deploy/ par
+# kustomize (le même que `kubectl apply -k deploy` et que Flux), avec les
+# ConfigMaps générées et leurs noms à empreinte. Valider les fichiers un par
+# un laisserait passer un manifest oublié dans un kustomization.yaml, ou un
+# fichier de configuration introuvable. kubeconform lit le rendu sur son
+# entrée standard (-i).
 # -strict refuse les champs inconnus et les clés en double, qu'un
 # `kubectl apply` ignorerait sans rien dire.
-mapfile -t MANIFESTS < <(grep -rlE '^kind: ' manifests monitoring | sort)
-check "kubeconform" run "$KUBECONFORM_IMAGE" -strict -summary "${MANIFESTS[@]}"
+validate_render() {
+    run "$KUSTOMIZE_IMAGE" build deploy \
+        | run -i "$KUBECONFORM_IMAGE" -strict -summary
+}
+check "kustomize build + kubeconform" validate_render
+
+# Les objets de Flux (GitRepository, Kustomization) ne font pas partie de
+# l'API standard : kubeconform n'a pas leur schéma par défaut. Le catalogue
+# communautaire CRDs-catalog les publie, épinglé ici à un commit pour que la
+# validation ne change pas sans nous.
+CRDS_CATALOG="https://raw.githubusercontent.com/datreeio/CRDs-catalog/501527ab9c40c827144c8f45945b25a023e344ce"
+check "kubeconform (objets Flux)" run "$KUBECONFORM_IMAGE" -strict -summary \
+    -schema-location default \
+    -schema-location "$CRDS_CATALOG/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+    deploy/flux-sync.yaml
 
 # terraform init écrit dans le répertoire (.terraform/) : on travaille sur
 # une copie, à l'intérieur du conteneur. init télécharge le provider AWS

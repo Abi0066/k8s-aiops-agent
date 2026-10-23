@@ -1,0 +1,68 @@
+# Synchronisation GitOps : ce que Flux surveille, et ce qu'il applique.
+#
+# Deux objets, deux contrôleurs Flux :
+#
+#   GitRepository  (source-controller)     -> « quoi surveiller » : un dépôt,
+#                                             une branche. Toutes les minutes,
+#                                             il récupère le dernier commit.
+#   Kustomization  (kustomize-controller)  -> « quoi appliquer » : un dossier
+#                                             de ce dépôt, rendu par kustomize
+#                                             puis appliqué au cluster.
+#
+# Ce fichier est appliqué par scripts/gitops.sh (make gitops-up), pas par
+# Flux lui-même : voir deploy/kustomization.yaml. Le script peut remplacer
+# l'URL et la branche ci-dessous pour suivre un fork :
+#   make gitops-up GITOPS_REPO_URL=https://github.com/<vous>/k8s-aiops-agent \
+#                  GITOPS_BRANCH=ma-branche
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: k8s-aiops-agent
+  namespace: flux-system
+spec:
+  # Fréquence à laquelle Flux interroge le dépôt. Un push est donc déployé en
+  # une minute au plus ; `make gitops-sync` force une synchronisation.
+  interval: 1m
+  # Dépôt public en HTTPS : Flux le lit sans identifiants. Un dépôt privé
+  # demanderait un Secret (clé SSH ou jeton) référencé par spec.secretRef.
+  url: https://github.com/Abi0066/k8s-aiops-agent
+  ref:
+    branch: main
+  # Flux n'a besoin que des YAML de déploiement. Le reste du dépôt (code de
+  # l'agent, Terraform...) est exclu de l'archive qu'il télécharge
+  # (syntaxe .gitignore : tout exclure, puis réinclure trois dossiers).
+  ignore: |
+    /*
+    !/deploy/
+    !/manifests/
+    !/monitoring/
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: k8s-aiops-agent
+  namespace: flux-system
+spec:
+  sourceRef:
+    kind: GitRepository
+    name: k8s-aiops-agent
+  # Le même dossier que `make cluster-up` applique avec kubectl apply -k.
+  path: ./deploy
+  # Un nouveau commit déclenche une synchronisation immédiate. L'intervalle
+  # sert à autre chose : toutes les 5 minutes, Flux réapplique Git même sans
+  # commit, ce qui annule une modification faite à la main dans le cluster
+  # (la « dérive »).
+  interval: 5m
+  # Après un échec, Flux réessaie au bout d'une minute, sans attendre 5 min.
+  retryInterval: 1m
+  # prune : un objet retiré de Git est supprimé du cluster. C'est aussi ce
+  # qui fait disparaître les anciennes ConfigMaps générées par kustomize
+  # (prometheus-config-<empreinte>) quand leur contenu change.
+  prune: true
+  # wait : la synchronisation n'est « Ready » que lorsque tous les objets
+  # appliqués le sont (Deployments disponibles, PVC lié...), pas seulement
+  # acceptés par l'API. Le délai est long à cause du premier démarrage
+  # d'Ollama, qui télécharge son modèle (~9 Go) avant d'être prêt.
+  wait: true
+  timeout: 15m

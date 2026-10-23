@@ -1,0 +1,61 @@
+# Kustomization du monitoring : kube-state-metrics, Prometheus, Alertmanager
+# et Grafana, avec leurs ConfigMaps.
+#
+# Assemblé avec manifests/ dans deploy/kustomization.yaml. Un manifest absent
+# de cette liste n'est ni déployé ni validé par `make validate`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Les ConfigMaps générées ci-dessous n'ont pas de namespace dans leur
+# déclaration : kustomize leur donne celui-ci (les autres objets le portent
+# déjà).
+namespace: aiops
+
+resources:
+  - kube-state-metrics.yaml
+  - alertmanager/alertmanager-deployment.yaml
+  - prometheus/prometheus.yaml
+  - grafana/grafana.yaml
+
+# ---------------------------------------------------------------------------
+# ConfigMaps générées depuis les fichiers sources
+# ---------------------------------------------------------------------------
+# La configuration de Prometheus, ses règles d'alerte, celle d'Alertmanager et
+# les dashboards Grafana restent des fichiers lisibles et commentés (et
+# vérifiés tels quels par promtool et amtool). kustomize les emballe dans des
+# ConfigMaps au moment du rendu : ce qui est déployé vient entièrement de Git,
+# sans étape manuelle `kubectl create configmap`.
+#
+# La syntaxe `clé=fichier` choisit le nom du fichier dans le pod : Prometheus
+# lit /etc/prometheus/prometheus.yml, pas config.yaml.
+#
+# kustomize ajoute au nom de chaque ConfigMap une empreinte de son contenu
+# (prometheus-config-7g2k9...) et met à jour les Deployments qui la montent.
+# Modifier une règle d'alerte change donc le nom de la ConfigMap, donc le
+# Deployment, donc Kubernetes recrée le pod : la nouvelle configuration est
+# prise en compte sans redémarrage manuel. Avec un nom fixe, le pod garderait
+# l'ancienne configuration en mémoire jusqu'à son prochain redémarrage.
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - prometheus.yml=prometheus/config.yaml
+
+  - name: prometheus-rules
+    files:
+      - alerts.yaml=prometheus/rules/alerts.yaml
+
+  - name: alertmanager-config
+    files:
+      - alertmanager.yml=alertmanager/alertmanager.yaml
+
+  # Deux fichiers dans la même ConfigMap : le provider (où Grafana cherche
+  # les dashboards) et le dashboard lui-même. Le JSON reste un .json, que
+  # l'on peut réexporter depuis l'interface de Grafana sans le noyer dans du
+  # YAML.
+  - name: grafana-dashboards
+    files:
+      - dashboard.yaml=grafana/dashboards/provider.yaml
+      - demo-app.json=grafana/dashboards/demo-app.json
+    options:
+      labels:
+        app.kubernetes.io/name: grafana

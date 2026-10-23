@@ -15,7 +15,8 @@ CLUSTER_NAME ?= k8s-aiops
 NAMESPACE    ?= aiops
 
 .PHONY: help setup cluster-up cluster-down build demo-crash demo-oom \
-        status logs ports clean-images agent-logs agent-health test lint validate
+        status logs ports clean-images agent-logs agent-health test lint validate \
+        gitops-up gitops-sync gitops-status
 
 ## help : affiche cette aide
 help:
@@ -28,6 +29,7 @@ help:
 	@echo "    make setup        # installe kind + kubectl"
 	@echo "    make build        # construit les images"
 	@echo "    make cluster-up   # crée le cluster, y charge les images, déploie tout"
+	@echo "      ou make gitops-up  # idem, mais c'est Flux qui déploie depuis Git"
 	@echo "    make demo-crash   # provoque un incident de démonstration"
 	@echo ""
 
@@ -38,6 +40,22 @@ setup:
 ## cluster-up : crée le cluster kind et déploie les étapes 1 à 3
 cluster-up:
 	@./scripts/cluster-up.sh
+
+## gitops-up : comme cluster-up, mais Flux déploie la stack depuis Git
+# Pour suivre un fork ou une branche :
+#   make gitops-up GITOPS_REPO_URL=https://github.com/<vous>/k8s-aiops-agent \
+#                  GITOPS_BRANCH=ma-branche
+# make transmet ces variables au script par l'environnement.
+gitops-up:
+	@./scripts/gitops.sh up
+
+## gitops-sync : force Flux à appliquer le dernier commit, sans attendre
+gitops-sync:
+	@./scripts/gitops.sh sync
+
+## gitops-status : état de la synchronisation Flux (révision appliquée)
+gitops-status:
+	@./scripts/gitops.sh status
 
 ## cluster-down : détruit le cluster et nettoie les ressources
 cluster-down:

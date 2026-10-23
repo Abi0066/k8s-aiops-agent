@@ -1,6 +1,6 @@
 # K8s AI Ops Agent — Diagnostic et auto-guérison d'incidents Kubernetes avec un agent IA local
 
-> **Projet en cours — étapes 1 à 3 terminées.**
+> **Projet en cours — étapes 1 à 3 et 5 (GitOps) terminées.**
 > Construit comme projet d'apprentissage pour comprendre chaque brique de bout en bout.
 
 ## Le problème
@@ -99,6 +99,9 @@ make cluster-up   # crée le cluster, y charge les images, déploie les étapes 
 make demo-crash   # provoque un incident et affiche le diagnostic
 ```
 
+`make gitops-up` remplace `make cluster-up` pour un déploiement piloté par
+Git : voir [Déploiement GitOps](#déploiement-gitops).
+
 > **Premier démarrage :** Ollama télécharge le modèle `qwen2.5-coder:14b`
 > (~9 Go) avant d'être prêt. Comptez plusieurs minutes selon la connexion ;
 > pour suivre le téléchargement :
@@ -124,6 +127,83 @@ kubectl -n aiops port-forward svc/aiops-agent 8080:8080
 # puis ouvrir http://localhost:8080/docs
 ```
 
+## Déploiement GitOps
+
+`make cluster-up` applique les manifests **du disque** : pratique pour
+développer, mais ce qui tourne dépend de qui a lancé quoi, depuis quelle
+copie du dépôt. En GitOps, le cluster applique lui-même **ce qui est dans
+Git**. Un changement passe par un commit, se relit dans une pull request, et
+s'annule par un `git revert`.
+
+```bash
+make build        # les images restent construites localement (voir plus bas)
+make gitops-up    # installe Flux, qui déploie la stack depuis la branche main
+make gitops-status
+```
+
+```mermaid
+flowchart LR
+    Dev["git push"] --> GH["Dépôt GitHub"]
+    subgraph K8s["Cluster kind"]
+        subgraph Flux["namespace flux-system"]
+            SC["source-controller<br/>GitRepository"]
+            KC["kustomize-controller<br/>Kustomization"]
+        end
+        Stack["namespace aiops<br/>la stack des étapes 1 à 3"]
+    end
+    SC -->|interroge toutes les minutes| GH
+    SC -->|archive du commit| KC
+    KC -->|kustomize build deploy/<br/>puis apply| Stack
+```
+
+Les deux objets qui décrivent la synchronisation sont dans
+[`deploy/flux-sync.yaml`](deploy/flux-sync.yaml) :
+
+| Objet | Rôle | Réglage clé |
+|---|---|---|
+| `GitRepository` | quoi surveiller : un dépôt, une branche | `interval: 1m` : un push est déployé en une minute au plus |
+| `Kustomization` | quoi appliquer : le dossier `deploy/` | `prune: true`, `wait: true`, `interval: 5m` |
+
+Ce que ces réglages apportent :
+
+- **une seule source de vérité.** `deploy/kustomization.yaml` assemble
+  `manifests/` et `monitoring/`. `make cluster-up` (`kubectl apply -k deploy`)
+  et Flux appliquent exactement le même rendu ;
+- **la correction de dérive.** Toutes les 5 minutes, Flux réapplique Git même
+  sans nouveau commit. Un `kubectl scale` ou un `kubectl edit` fait à la main
+  est annulé : pour changer le cluster, on change Git ;
+- **le nettoyage (`prune`).** Un objet retiré de Git est supprimé du cluster.
+  Avec un simple `kubectl apply`, il resterait orphelin ;
+- **un état vérifiable.** `make gitops-status` affiche le commit appliqué
+  (`Applied revision: main@sha1:…`) ; la Kustomization n'est `Ready` que
+  lorsque tous les objets le sont (`wait: true`), pas seulement acceptés par
+  l'API.
+
+Pour forcer une synchronisation sans attendre l'intervalle :
+
+```bash
+git push
+make gitops-sync   # récupère le dernier commit et l'applique
+```
+
+Pour suivre un fork, ou une branche en cours de revue :
+
+```bash
+make gitops-up GITOPS_REPO_URL=https://github.com/<vous>/k8s-aiops-agent GITOPS_BRANCH=ma-branche
+```
+
+`flux-sync.yaml` n'est volontairement **pas** synchronisé par Flux lui-même :
+il remettrait l'URL du dépôt principal à chaque cycle, et un fork ne pourrait
+plus se déployer depuis sa propre branche. Le script l'applique une fois,
+avec l'URL et la branche demandées.
+
+> **Les images ne passent pas par Git.** demo-app et l'agent sont construits
+> localement et chargés dans le nœud (`imagePullPolicy: Never`). Flux
+> déploie les manifests, pas le code : après une modification de
+> `app/` ou `agent/`, c'est toujours `make build` qui reconstruit et
+> redémarre les pods. Aller plus loin demanderait un registre d'images et
+> l'automatisation d'images de Flux, hors de portée d'un cluster local.
+
 ## Tests et vérifications
 
 Tout se vérifie **sans cluster**.
@@ -148,7 +228,7 @@ chaque outil tourne dans un conteneur, à une version épinglée.
 | hadolint | les Dockerfiles |
 | promtool | la configuration Prometheus, les règles d'alerte et leurs tests unitaires (`monitoring/prometheus/tests/`) |
 | amtool | la configuration Alertmanager |
-| kubeconform | les manifests, contre le schéma de l'API Kubernetes (champs inconnus, clés en double) |
+| kustomize + kubeconform | le rendu de `deploy/` (ce qu'appliquent kubectl et Flux) contre le schéma de l'API Kubernetes (champs inconnus, clés en double), et les objets Flux contre leur CRD |
 | terraform | le formatage et la validité des modules |
 | actionlint | les workflows GitHub Actions |
 
@@ -174,7 +254,11 @@ des deux images).
 │   ├── requirements.txt
 │   ├── requirements-dev.txt  pytest + ruff
 │   └── Dockerfile
+├── deploy/               Point d'entrée du déploiement (étape 5)
+│   ├── kustomization.yaml  Assemble manifests/ et monitoring/
+│   └── flux-sync.yaml    Ce que Flux surveille (dépôt, branche) et applique
 ├── manifests/            Manifests Kubernetes
+│   ├── kustomization.yaml  Liste des manifests déployés
 │   ├── namespace.yaml    Le namespace aiops
 │   ├── demo-app.yaml     L'application de démonstration
 │   ├── aiops-agent.yaml  ServiceAccount + RBAC + Deployment + Service
@@ -183,7 +267,8 @@ des deux images).
 │   ├── prometheus/       Config, règles d'alerte (format natif) et leurs tests
 │   ├── alertmanager/     Config Alertmanager (route, receivers, inhibitions)
 │   ├── grafana/          Provisioning Grafana + dashboard
-│   └── kube-state-metrics.yaml
+│   ├── kube-state-metrics.yaml
+│   └── kustomization.yaml  Manifests + ConfigMaps générées depuis les configs
 ├── scripts/              Installation, pilotage et vérification (lib.sh : réglages communs)
 ├── terraform/            VPC AWS, socle réseau d'un futur EKS (jamais appliqué par défaut)
 ├── .github/workflows/    CI : agent-ci (ruff + pytest), infra-ci (make validate + images)
@@ -199,7 +284,7 @@ des deux images).
 | 2 | Détection : règles d'alerte + webhook | ✅ |
 | 3 | Agent IA : service FastAPI, collecte de preuves, LLM local | ✅ |
 | 4 | Action : auto-guérison avec mode dry-run par défaut | 🔜 |
-| 5 | GitOps : CI/CD, ArgoCD, README final et démo | 🔜 |
+| 5 | GitOps : Flux synchronise le cluster depuis Git, CI GitHub Actions | ✅ |
 
 ## Choix techniques et justification
 
@@ -519,6 +604,44 @@ Deux exceptions, assumées :
   appartiennent, et monte `/dev/dri` de l'hôte pour le GPU. Il garde seccomp,
   aucune capacité Linux et aucune élévation de privilèges.
 
+### Flux plutôt qu'Argo CD
+
+La feuille de route prévoyait Argo CD. Les deux outils font la même chose
+(un contrôleur dans le cluster qui applique Git) ; la différence est le
+poids, et ce cluster partage la machine avec un modèle de 14 milliards de
+paramètres.
+
+| | Flux (retenu) | Argo CD |
+|---|---|---|
+| Pods installés | 2 (source-controller, kustomize-controller) | 7 dans l'installation standard : API + UI, repo-server, contrôleur d'applications, Redis, Dex, ApplicationSet, notifications |
+| Mémoire | 64 Mi demandés par contrôleur | quelques centaines de Mo en pratique |
+| Interface | CLI et `kubectl` | interface web |
+
+Flux est modulaire : `flux install --components=...` n'installe que les deux
+contrôleurs utiles ici, sans les contrôleurs Helm, de notifications et
+d'images. Sa CLI tourne dans un conteneur épinglé (`ghcr.io/fluxcd/flux-cli`),
+comme les outils de `make validate` : rien à installer sur l'hôte. L'interface
+web d'Argo CD est son vrai avantage — pour une démonstration en ligne de
+commande, elle ne justifie pas son coût.
+
+### Les ConfigMaps de configuration sont générées par kustomize
+
+La configuration de Prometheus, ses règles d'alerte, celle d'Alertmanager et
+les dashboards Grafana restent des fichiers lisibles et commentés
+(`monitoring/`), vérifiés tels quels par promtool et amtool. Avant l'étape 5,
+`cluster-up.sh` les emballait dans des ConfigMaps avec
+`kubectl create configmap` : une étape impérative qu'un outil GitOps ne sait
+pas rejouer. Le `configMapGenerator` de `monitoring/kustomization.yaml` fait
+la même chose de façon déclarative, au moment du rendu.
+
+Bonus : kustomize ajoute au nom de chaque ConfigMap une empreinte de son
+contenu (`prometheus-config-9c4d68gm99`) et réécrit les Deployments qui la
+montent. Modifier une règle d'alerte change le nom de la ConfigMap, donc le
+Deployment, donc Kubernetes recrée le pod avec la nouvelle configuration.
+Avec un nom fixe, le pod garderait l'ancienne configuration jusqu'à son
+prochain redémarrage. L'ancienne ConfigMap, qui n'est plus dans le rendu,
+est supprimée par Flux (`prune`).
+
 ## Nettoyage
 
 ```bash
@@ -527,7 +650,7 @@ make clean-images   # idem, et supprime aussi les deux images du projet
 ```
 
 Le modèle d'Ollama vit dans un volume du cluster : il est supprimé avec lui,
-et retéléchargé (~9 Go) au prochain `make cluster-up`.
+et retéléchargé (~9 Go) au prochain `make cluster-up` ou `make gitops-up`.
 
 Rien n'est facturé : le cluster est local, et le Terraform n'est jamais
 appliqué par défaut.

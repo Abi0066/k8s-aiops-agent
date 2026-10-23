@@ -101,3 +101,78 @@ load_image() (
     "$RUNTIME" save -o "$dir/image.tar" "$image"
     kind load image-archive "$dir/image.tar" --name "$CLUSTER_NAME"
 )
+
+# ---------------------------------------------------------------------------
+# Préparation et suivi du déploiement (cluster-up.sh et gitops.sh)
+# ---------------------------------------------------------------------------
+# Les deux modes de déploiement commencent de la même façon : un cluster, et
+# nos images dans son nœud. Ils ne diffèrent que par ce qui applique les
+# manifests ensuite : kubectl depuis le disque, ou Flux depuis Git.
+#
+# Crée le cluster s'il n'existe pas, pointe kubectl dessus et y charge les
+# images.
+prepare_cluster() {
+    local image
+
+    # demo-app et l'agent sont en imagePullPolicy: Never : sans leur image dans
+    # le nœud, leurs pods resteraient en ErrImageNeverPull. On vérifie qu'elles
+    # sont construites AVANT de créer le cluster, pour échouer tôt et proprement.
+    for image in "$DEMO_APP_IMAGE" "$AGENT_IMAGE"; do
+        "$RUNTIME" image inspect "$image" >/dev/null 2>&1 \
+            || die "Image $image introuvable : lancez d'abord 'make build'."
+    done
+
+    if cluster_exists; then
+        log "Le cluster '$CLUSTER_NAME' existe déjà."
+    else
+        log "Création du cluster '$CLUSTER_NAME'..."
+        kind create cluster --name "$CLUSTER_NAME" \
+            --config "$REPO_ROOT/kind-config.yaml" --wait 120s
+    fi
+
+    # Le contexte kubectl doit pointer sur notre cluster.
+    kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
+
+    # Les images publiques que l'hôte n'a pas encore (make build ne les a pas
+    # tirées) seront tirées par le kubelet.
+    log "Chargement des images dans le nœud..."
+    load_image "$DEMO_APP_IMAGE"
+    load_image "$AGENT_IMAGE"
+    while read -r image; do
+        if "$RUNTIME" image inspect "$image" >/dev/null 2>&1; then
+            load_image "$image"
+        fi
+    done < <(third_party_images)
+}
+
+# Attend que tous les pods du namespace soient Ready.
+#
+# Le délai est long (600 s) à cause de l'initContainer d'Ollama, qui télécharge
+# le modèle (~9 Go) au premier démarrage. Un dépassement n'est pas une erreur :
+# le déploiement continue, on affiche seulement où regarder.
+wait_for_pods() {
+    log "Attente que les pods soient prêts (timeout 600s)..."
+    if ! kubectl wait --for=condition=Ready pod \
+            --namespace="$NAMESPACE" \
+            --all \
+            --timeout=600s 2>/dev/null; then
+        warn "Tous les pods ne sont pas Ready. État actuel :"
+        kubectl get pods --namespace="$NAMESPACE"
+        warn "Au premier démarrage, Ollama télécharge encore son modèle :"
+        warn "    kubectl -n $NAMESPACE logs deploy/ollama -c pull-model -f"
+    fi
+}
+
+# Les adresses à retenir, affichées à la fin d'un déploiement.
+print_access() {
+    log "Application : http://localhost:30090/health"
+    log "Prometheus  : http://localhost:30093"
+    log "Grafana     : http://localhost:30094  (admin / admin)"
+    log
+    log "Agent IA        :  kubectl -n $NAMESPACE port-forward svc/aiops-agent 8080"
+    log
+    log "Tester un crash :  curl http://localhost:30090/crash"
+    log "Tester un OOM   :  curl http://localhost:30090/oom"
+    log "Voir les logs   :  kubectl -n $NAMESPACE logs -l app=demo-app"
+    log "Logs de l'agent :  kubectl -n $NAMESPACE logs -l app=aiops-agent -f"
+}

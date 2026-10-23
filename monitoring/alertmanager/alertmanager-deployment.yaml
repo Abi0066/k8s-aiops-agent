@@ -1,12 +1,12 @@
-# Alertmanager — ConfigMap + Deployment + Service.
+# Alertmanager — Deployment + Service.
 #
 # Alertmanager reçoit les alertes de Prometheus, les regroupe, les inhibe
 # entre elles, puis les envoie au receiver configuré (notre agent IA).
 ---
-# La ConfigMap alertmanager-config n'est PAS définie ici : elle est générée
-# par scripts/cluster-up.sh depuis monitoring/alertmanager/alertmanager.yaml.
-# Même approche que pour la configuration Prometheus — on garde la config
-# dans un fichier séparé, lisible et commenté, et le script la monte.
+# La ConfigMap alertmanager-config n'est PAS définie ici : kustomize la génère
+# depuis monitoring/alertmanager/alertmanager.yaml (configMapGenerator de
+# monitoring/kustomization.yaml). Même approche que pour la configuration
+# Prometheus — on garde la config dans un fichier séparé, lisible et commenté.
 #
 apiVersion: apps/v1
 kind: Deployment
