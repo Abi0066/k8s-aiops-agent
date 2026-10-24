@@ -66,7 +66,16 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "decimals": 0
+          "decimals": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 107374182 },
+              { "color": "red", "value": 134217728 }
+            ]
+          }
         },
         "overrides": []
       }
@@ -152,14 +161,25 @@
         },
         {
           "expr": "sum(container_memory_working_set_bytes{namespace=\"aiops\", container=\"demo-app\"})",
-          "legendFormat": "Mémoire (bytes)"
+          "legendFormat": "Mémoire"
         }
       ],
       "fieldConfig": {
-        "defaults": {
-          "min": 0
-        },
-        "overrides": []
+        "defaults": { "min": 0 },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "CPU (cores)" },
+            "properties": [{ "id": "unit", "value": "cores" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Mémoire" },
+            "properties": [
+              { "id": "unit", "value": "bytes" },
+              { "id": "decimals", "value": 0 },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
       }
     }
   ],
