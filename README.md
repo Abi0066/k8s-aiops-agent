@@ -1,6 +1,6 @@
 # K8s AI Ops Agent — Diagnostic et auto-guérison d'incidents Kubernetes avec un agent IA local
 
-> **Projet en cours — étapes 1 à 5 terminées ; étape 6 (CI/CD des images) à venir.**
+> **Projet en cours — étapes 1 à 6 terminées.**
 > Construit comme projet d'apprentissage pour comprendre chaque brique de bout en bout.
 
 ## Le problème
@@ -100,8 +100,7 @@ systemctl --user enable --now podman.socket
 
 ```bash
 make setup        # installe kind + kubectl dans ~/.local/bin (sans root)
-make build        # construit les images de l'application et de l'agent
-make cluster-up   # crée le cluster, y charge les images, déploie les étapes 1 à 4
+make cluster-up   # crée le cluster et déploie la stack (images tirées de GHCR)
 make demo-crash   # provoque un incident et affiche le diagnostic
 ```
 
@@ -113,8 +112,10 @@ Git : voir [Déploiement GitOps](#déploiement-gitops).
 > pour suivre le téléchargement :
 > `kubectl -n aiops logs deploy/ollama -c pull-model -f`.
 >
-> **Après une modification du code**, `make build` reconstruit les images,
-> les recharge dans le cluster et redémarre les pods concernés.
+> **Après une modification du code**, un `git push` suffit : GitHub Actions
+> construit et publie les images, puis Flux déploie le nouveau tag. Pour
+> travailler hors ligne, `make build` construit le tag du manifest et le
+> charge dans le nœud.
 
 Puis ouvrez :
 
@@ -215,12 +216,55 @@ il remettrait l'URL du dépôt principal à chaque cycle, et un fork ne pourrait
 plus se déployer depuis sa propre branche. Le script l'applique une fois,
 avec l'URL et la branche demandées.
 
-> **Les images ne passent pas par Git.** demo-app et l'agent sont construits
-> localement et chargés dans le nœud (`imagePullPolicy: Never`). Flux
-> déploie les manifests, pas le code : après une modification de
-> `app/` ou `agent/`, c'est toujours `make build` qui reconstruit et
-> redémarre les pods. Aller plus loin demanderait un registre d'images et
-> l'automatisation d'images de Flux, hors de portée d'un cluster local.
+> **Les images viennent de GHCR.** Le kubelet les tire du registre
+> (`imagePullPolicy: IfNotPresent`) ; `make build` reste le repli hors ligne.
+> Voir [CI/CD des images](#cicd-des-images).
+
+## CI/CD des images
+
+Jusqu'à l'étape 5, un `git push` changeait les manifests mais pas le code
+exécuté : les images ne vivaient que sur la machine. L'étape 6 ferme la
+boucle.
+
+```mermaid
+sequenceDiagram
+    participant Dev as git push
+    participant CI as GitHub Actions
+    participant Reg as GHCR
+    participant Git as main
+    participant Flux as Flux
+    participant K as kubelet
+
+    Dev->>CI: push sur app/ ou agent/
+    CI->>CI: build demo-app et agent
+    CI->>Reg: push :sha-<commit>
+    CI->>Git: commit « chore(images) »
+    Flux->>Git: récupère le commit
+    Flux->>K: nouveau tag dans le Deployment
+    K->>Reg: tirage de l'image
+```
+
+| Décision | Choix | Raison |
+|---|---|---|
+| Tag | `sha-<7>` immuable | un tag publié ne change jamais de contenu ; l'image est reliée à un commit |
+| Mise à jour du manifest | commit automatique par la CI | Flux reste à deux contrôleurs, aucun jeton d'écriture dans le cluster |
+| Visibilité | packages publics | le kubelet tire sans secret ; un package privé demanderait un `imagePullSecret` |
+| Repli local | `make build` | construit le tag du manifest et le charge dans kind, pour travailler hors ligne |
+
+Vérifié de bout en bout : le commit `642e773` a produit l'image
+`sha-642e773` (digest `sha256:d8bfa2…`), le commit de bump `0976317`, et le
+pod `demo-app-6f84c46f48-…` répond avec cette image. Le build précédent
+(`sha-c6591b9`) avait un autre digest : deux commits, deux images distinctes.
+
+Trois pièges rencontrés, et ce qu'ils apprennent :
+
+- **Un push fait avec `GITHUB_TOKEN` ne déclenche aucun autre workflow.**
+  C'est ce qui empêche le commit de bump de relancer la CI en boucle.
+- **Modifier un fichier de `.github/workflows/` exige le scope `workflow`**
+  sur le jeton Git, même avec `repo` : GitHub protège l'ajout de workflows.
+- **GHCR répond `401` à un `curl` brut, même pour une image publique.** Le
+  protocole Docker Registry v2 demande d'abord un jeton anonyme ; le vrai
+  test est `podman pull` sans être connecté.
 
 ## Tests et vérifications
 
@@ -291,7 +335,9 @@ des deux images).
 │   └── kustomization.yaml  Manifests + ConfigMaps générées depuis les configs
 ├── scripts/              Installation, pilotage et vérification (lib.sh : réglages communs)
 ├── terraform/            VPC AWS, socle réseau d'un futur EKS (jamais appliqué par défaut)
-├── .github/workflows/    CI : agent-ci (ruff + pytest), infra-ci (make validate + images)
+├── .github/workflows/    CI : agent-ci (lint + tests), infra-ci (validate + images),
+│                         images-release (publication GHCR + commit de bump)
+├── CHANGELOG.md          Historique, par pull request fusionnée
 ├── kind-config.yaml      Configuration du cluster local
 └── Makefile              Point d'entrée unique
 ```
@@ -305,7 +351,7 @@ des deux images).
 | 3 | Agent IA : service FastAPI, collecte de preuves, LLM local | ✅ |
 | 4 | Action : auto-guérison avec mode dry-run par défaut | ✅ |
 | 5 | GitOps : Flux synchronise le cluster depuis Git, CI GitHub Actions | ✅ |
-| 6 | CI/CD des images : build dans GitHub Actions, publication dans un registre, déploiement du tag par Flux | ⏳ |
+| 6 | CI/CD des images : build dans GitHub Actions, publication dans GHCR, déploiement du tag par Flux | ✅ |
 
 ## Choix techniques et justification
 
@@ -336,10 +382,17 @@ Sans lui, on ne peut pas distinguer un `CrashLoopBackOff` d'un `OOMKilled` en
 lisant les métriques — ce qui est précisément la distinction que l'agent devra
 faire.
 
-### `imagePullPolicy: Never` sur l'application de démonstration
+### Les images viennent de GHCR
 
-L'image n'existe que localement (chargée par `kind load`). Sans ce réglage, le
-kubelet tente de la tirer depuis un registre distant et échoue en `ErrImagePull`.
+À l'étape 5, les images n'existaient que sur la machine : `make build` les
+chargeait dans le nœud, et `imagePullPolicy: Never` empêchait le kubelet de
+chercher ailleurs. L'étape 6 renverse la situation : les manifests portent un
+nom de registre (`ghcr.io/abi0066/…`) et `imagePullPolicy: IfNotPresent`
+laisse le kubelet tirer l'image publiée par la CI.
+
+Le repli local reste possible : `make build` lit le tag dans le manifest,
+construit la même référence et la charge dans kind. Le nœud la trouve sur
+place et ne tire rien. C'est ce qui permet de travailler hors ligne.
 
 ### `waitress` et non `gunicorn` : un choix de scénario
 
@@ -726,6 +779,22 @@ comme les outils de `make validate` : rien à installer sur l'hôte. L'interface
 web d'Argo CD est son vrai avantage — pour une démonstration en ligne de
 commande, elle ne justifie pas son coût.
 
+### Un commit de bump plutôt que Flux Image Automation
+
+Deux façons de mettre à jour l'image d'un Deployment depuis Git :
+
+| | Commit de bump (retenu) | Flux Image Automation |
+|---|---|---|
+| Qui écrit dans Git | GitHub Actions | un contrôleur Flux |
+| Contrôleurs Flux | 2 (inchangé) | 4 |
+| Jeton d'écriture dans le cluster | aucun | oui (clé de déploiement) |
+| Traçabilité | commit du bot, `git revert` | commit du bot, même principe |
+| Latence | un run de CI | un scan du registre |
+
+Le commit de bump ajoute une étape visible : la CI réécrit `manifests/*.yaml`
+puis pousse. C'est moins « magique », mais le cluster n'a aucun droit
+d'écriture sur le dépôt, et l'image déployée reste reliée à un commit.
+
 ### Les ConfigMaps de configuration sont générées par kustomize
 
 La configuration de Prometheus, ses règles d'alerte, celle d'Alertmanager et
@@ -751,7 +820,9 @@ qu'il ne couvre pas, et pourquoi :
 
 | Limite | Conséquence | Piste |
 |---|---|---|
-| Les images ne passent pas par Git | `imagePullPolicy: Never` + `kind load` : après une modification de `app/` ou `agent/`, `make build` reste obligatoire. Un `git push` seul ne change pas le code exécuté | étape 6 : construire dans GitHub Actions, publier dans GHCR, laisser Flux appliquer le nouveau tag |
+| Les images ne sont ni signées ni scannées | la CI construit et publie sans SBOM, sans `trivy`, sans signature `cosign` | ajouter un scan bloquant et une signature avant publication |
+| Une seule architecture | `linux/amd64` uniquement ; un Mac ARM ne pourrait pas exécuter l'image telle quelle | `platforms: linux/amd64,linux/arm64` dans buildx |
+| Le bump est poussé directement sur `main` | le commit de la CI n'est pas relu | ouvrir une PR automatique si le dépôt exige une revue |
 | Auto-guérison volontairement étroite | un seul cas (`OOMKilled`, confiance `high`), une seule action (relever la limite), plafond `512Mi`, une action par heure | ajouter une action seulement après avoir défini son dry-run et son retour arrière |
 | Le correctif mémoire est écrasé par Git | l'annotation `aiops-agent/autoheal-memory` le signale ; le prochain `apply` remet `128Mi` | reporter la valeur dans le dépôt, ou corriger la consommation de l'application |
 | Anti-doublon par alerte, pas par pod | `DemoAppCrashLooping` et `DemoAppDown` ont chacune leur empreinte : un même pod produit deux analyses LLM | dédupliquer par `namespace/pod` sur une fenêtre courte |

@@ -5,6 +5,40 @@ n'a pas de numéro de version : chaque entrée correspond à une pull request
 fusionnée dans `main`. Le format s'inspire de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 
+## 2026-10-24 : CI/CD des images (étape 6)
+
+Poussé directement sur `main`, sans pull request.
+
+### Ajouté
+- `.github/workflows/images-release.yml` : construit demo-app et l'agent,
+  publie dans GHCR sous un tag immuable `sha-<commit>`, puis commite les
+  nouveaux tags dans `manifests/`. Flux applique ce commit et le kubelet tire
+  les images du registre.
+- Packages publics `ghcr.io/abi0066/k8s-aiops-demo-app` et
+  `ghcr.io/abi0066/k8s-aiops-agent`.
+- `/health` renvoie le nom du pod : un rollout devient visible de l'extérieur.
+
+### Modifié
+- Manifests : noms GHCR et `imagePullPolicy: IfNotPresent` ; `make build`
+  devient un repli hors ligne au lieu d'être obligatoire.
+- `scripts/lib.sh` : les images du projet ne sont plus comptées comme tierces,
+  et leur absence en local n'est plus bloquante.
+- README : section CI/CD, justification du commit de bump, limites actualisées.
+
+### Corrigé
+- `wait_for_pods` attendait les pods `Completed` : un pod terminé n'étant
+  jamais `Ready`, chaque déploiement affichait un faux avertissement.
+
+## 2026-10-24 : documentation des étapes 3 à 5
+
+Poussé directement sur `main`, sans pull request.
+
+### Modifié
+- README : en-tête à jour, nuance sur inotify, mesures GitOps (dérive corrigée
+  en 311 s, `prune` prouvé) et table des limites connues.
+- « étapes 1 à 3 » corrigé en « 1 à 4 » dans le README, le Makefile,
+  `scripts/cluster-up.sh` et `deploy/kustomization.yaml`.
+
 ## 2026-10-23 : auto-guérison des OOMKilled (étape 4) — [#5](https://github.com/Abi0066/k8s-aiops-agent/pull/5)
 
 ### Ajouté
