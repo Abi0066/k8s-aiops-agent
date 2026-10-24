@@ -8,7 +8,7 @@
   "panels": [
     {
       "type": "stat",
-      "title": "Requêtes par seconde",
+      "title": "Requêtes / s",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
@@ -27,7 +27,7 @@
     },
     {
       "type": "stat",
-      "title": "Redémarrages du conteneur",
+      "title": "Redémarrages",
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
@@ -54,7 +54,7 @@
     },
     {
       "type": "stat",
-      "title": "Mémoire utilisée (pod)",
+      "title": "Mémoire du pod",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
