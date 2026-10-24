@@ -1,0 +1,131 @@
+# Étape 6 — CI/CD des images.
+#
+# Deux responsabilités, deux jobs :
+#
+#   build : construit demo-app et l'agent, les publie dans GHCR sous un tag
+#           IMMUABLE `sha-<7 caractères du commit>`. Un tag immuable garantit
+#           qu'une image publiée ne change jamais de contenu : ce que le
+#           cluster tire correspond exactement au commit.
+#
+#   bump  : réécrit les tags dans manifests/ et pousse un commit. Flux, qui
+#           surveille main, applique ce commit : le cluster tire alors les
+#           nouvelles images depuis le registre. C'est ce commit qui fait le
+#           lien entre « une image existe » et « le cluster l'utilise ».
+#
+# Pourquoi un commit de bump plutôt que Flux Image Automation ?
+#   - aucun contrôleur supplémentaire (Flux reste à deux) ;
+#   - aucun jeton en écriture dans le cluster : c'est GitHub Actions qui
+#     pousse, avec le GITHUB_TOKEN de la CI ;
+#   - l'historique Git montre qui a déployé quoi, et `git revert` annule.
+#
+# Point important : un push effectué avec le GITHUB_TOKEN ne déclenche PAS
+# d'autre workflow. Le commit de bump ne relance donc ni la CI ni ce workflow
+# (pas de boucle), même sans `[skip ci]`.
+
+name: images-release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "agent/**"
+      - ".github/workflows/images-release.yml"
+  # Permet de publier une image sans changer de code (démonstration, dépannage).
+  workflow_dispatch:
+
+permissions:
+  # contents: write pour pousser le commit de bump sur main.
+  # packages: write pour publier dans GHCR.
+  contents: write
+  packages: write
+
+# Deux exécutions simultanées pourraient publier deux tags puis se marcher
+# dessus au moment du bump : on les sérialise au lieu d'annuler la plus
+# ancienne (une image déjà publiée doit rester associée à son commit).
+concurrency:
+  group: images-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Le tag est calculé une seule fois et partagé : le job de build et celui
+  # de bump doivent écrire exactement la même valeur.
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - context: app
+            image: ghcr.io/abi0066/k8s-aiops-demo-app
+          - context: agent
+            image: ghcr.io/abi0066/k8s-aiops-agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          # Un tag par commit, jamais `latest` : un déploiement doit pouvoir
+          # être relié à un commit précis.
+          tags: ${{ matrix.image }}:${{ needs.meta.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          # Sans cela, buildx ajoute une attestation de provenance comme
+          # manifeste séparé (`unknown/unknown`) que certains runtimes locaux
+          # gèrent mal. Le gain est nul pour ce projet.
+          provenance: false
+          # Cache par contexte : sans `scope`, les deux images se
+          # remplaceraient mutuellement dans le cache GitHub Actions.
+          cache-from: type=gha,scope=${{ matrix.context }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.context }}
+
+  bump:
+    needs: [meta, build]
+    # Pas de bump depuis une exécution manuelle sur une branche : seul main
+    # est déployé par Flux.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Réécrire les tags dans les manifests
+        run: |
+          # Une seule ligne `image:` par fichier : le conteneur applicatif.
+          sed -i -E "s#^([[:space:]]*image:[[:space:]]*).*#\1ghcr.io/abi0066/k8s-aiops-demo-app:${TAG}#" manifests/demo-app.yaml
+          sed -i -E "s#^([[:space:]]*image:[[:space:]]*).*#\1ghcr.io/abi0066/k8s-aiops-agent:${TAG}#" manifests/aiops-agent.yaml
+          # L'image vient maintenant d'un registre : le kubelet doit pouvoir
+          # la tirer au lieu d'exiger une copie locale.
+          sed -i -E "s#^([[:space:]]*imagePullPolicy:[[:space:]]*).*#\1IfNotPresent#" manifests/demo-app.yaml manifests/aiops-agent.yaml
+          git diff --stat
+
+      - name: Commiter le nouveau tag
+        run: |
+          if git diff --quiet; then
+            echo "Tags déjà à jour, rien à commiter."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(images): publier ${TAG} [skip ci]"
+          git push

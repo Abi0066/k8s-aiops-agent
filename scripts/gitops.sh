@@ -42,8 +42,8 @@ cmd_up() {
     log "Runtime : $RUNTIME."
 
     # Même préparation que cluster-up.sh. Flux applique les manifests, mais
-    # ne construit pas nos images : demo-app et l'agent (imagePullPolicy:
-    # Never) doivent déjà être dans le nœud.
+    # ne construit pas nos images : soit elles ont été chargées par make build
+    # (repli hors ligne), soit le kubelet les tire depuis GHCR (étape 6).
     prepare_cluster
 
     # 1. Installation de Flux. Deux contrôleurs suffisent :

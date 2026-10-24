@@ -24,9 +24,11 @@ log "Runtime : $RUNTIME"
 # ---------------------------------------------------------------------------
 # Construction des images
 # ---------------------------------------------------------------------------
-# L'image est taguée avec le registre « localhost » : c'est la convention
-# Podman pour une image locale. Le tag est lu dans le manifest (lib.sh), pour
-# correspondre EXACTEMENT à celui que le kubelet va chercher.
+# Le tag est lu dans le manifest (lib.sh), pour correspondre EXACTEMENT à
+# celui que le kubelet va chercher. Depuis l'étape 6, c'est un nom GHCR
+# (`ghcr.io/...:sha-xxxxxxx`) publié par GitHub Actions. Construire ce tag en
+# local reste utile hors ligne : chargé dans le nœud, il est utilisé tel quel
+# (imagePullPolicy: IfNotPresent).
 build_image() {
     local context="$1" tag="$2"
     log "Construction de l'image $tag (contexte : $context)..."

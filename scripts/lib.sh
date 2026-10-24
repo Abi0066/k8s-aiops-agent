@@ -57,9 +57,16 @@ DEMO_APP_IMAGE="$(image_in manifests/demo-app.yaml)"
 AGENT_IMAGE="$(image_in manifests/aiops-agent.yaml)"
 
 # Images publiques du cluster : toutes celles des manifests, sauf les nôtres.
+#
+# Depuis l'étape 6, les nôtres portent un nom de registre (ghcr.io/...) : sans
+# cette exclusion, elles seraient tirées comme des images tierces au lieu
+# d'être construites par `make build`.
 third_party_images() {
     find "$REPO_ROOT/manifests" "$REPO_ROOT/monitoring" -name '*.yaml' -exec \
-        awk '$1 == "image:" && $2 !~ /^localhost\// { print $2 }' {} + | sort -u
+        awk -v ours="$DEMO_APP_IMAGE $AGENT_IMAGE" '
+            BEGIN { n = split(ours, a, " "); for (i = 1; i <= n; i++) keep[a[i]] = 1 }
+            $1 == "image:" && $2 !~ /^localhost\// && !($2 in keep) { print $2 }
+        ' {} + | sort -u
 }
 
 # ---------------------------------------------------------------------------
@@ -114,14 +121,10 @@ load_image() (
 prepare_cluster() {
     local image
 
-    # demo-app et l'agent sont en imagePullPolicy: Never : sans leur image dans
-    # le nœud, leurs pods resteraient en ErrImageNeverPull. On vérifie qu'elles
-    # sont construites AVANT de créer le cluster, pour échouer tôt et proprement.
-    for image in "$DEMO_APP_IMAGE" "$AGENT_IMAGE"; do
-        "$RUNTIME" image inspect "$image" >/dev/null 2>&1 \
-            || die "Image $image introuvable : lancez d'abord 'make build'."
-    done
-
+    # Les images du projet peuvent venir du registre (étape 6) : leur absence
+    # en local n'est plus bloquante, le kubelet les tire. On les charge
+    # seulement si `make build` les a construites, pour le développement hors
+    # ligne.
     if cluster_exists; then
         log "Le cluster '$CLUSTER_NAME' existe déjà."
     else
@@ -136,8 +139,14 @@ prepare_cluster() {
     # Les images publiques que l'hôte n'a pas encore (make build ne les a pas
     # tirées) seront tirées par le kubelet.
     log "Chargement des images dans le nœud..."
-    load_image "$DEMO_APP_IMAGE"
-    load_image "$AGENT_IMAGE"
+    for image in "$DEMO_APP_IMAGE" "$AGENT_IMAGE"; do
+        if "$RUNTIME" image inspect "$image" >/dev/null 2>&1; then
+            load_image "$image"
+        else
+            warn "Image absente en local : $image"
+            warn "Le nœud la tirera depuis le registre (make build pour le hors-ligne)."
+        fi
+    done
     while read -r image; do
         if "$RUNTIME" image inspect "$image" >/dev/null 2>&1; then
             load_image "$image"
