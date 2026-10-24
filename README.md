@@ -3,6 +3,18 @@
 > **Projet en cours — étapes 1 à 6 terminées.**
 > Construit comme projet d'apprentissage pour comprendre chaque brique de bout en bout.
 
+[![agent-ci](https://github.com/Abi0066/k8s-aiops-agent/actions/workflows/agent-ci.yml/badge.svg)](https://github.com/Abi0066/k8s-aiops-agent/actions/workflows/agent-ci.yml)
+[![infra-ci](https://github.com/Abi0066/k8s-aiops-agent/actions/workflows/infra-ci.yml/badge.svg)](https://github.com/Abi0066/k8s-aiops-agent/actions/workflows/infra-ci.yml)
+[![images-release](https://github.com/Abi0066/k8s-aiops-agent/actions/workflows/images-release.yml/badge.svg)](https://github.com/Abi0066/k8s-aiops-agent/actions/workflows/images-release.yml)
+
+**Sommaire** — [Le problème](#le-problème) · [Architecture](#architecture) ·
+[Prérequis](#prérequis) · [Démarrage rapide](#démarrage-rapide) ·
+[GitOps](#déploiement-gitops) · [CI/CD](#cicd-des-images) ·
+[Configuration de l'agent](#configuration-de-lagent) ·
+[Tests](#tests-et-vérifications) · [Structure](#structure-du-dépôt) ·
+[Étapes](#étapes-du-projet) · [Choix techniques](#choix-techniques-et-justification) ·
+[Dépannage](#dépannage) · [Limites](#limites-connues) · [Licence](#licence).
+
 ## Le problème
 
 Quand une application Kubernetes plante, la chaîne de diagnostic est aujourd'hui
@@ -18,8 +30,6 @@ dépassement de mémoire) — en mode `dry-run` par défaut, jamais en écriture
 directe sans décision humaine.
 
 ## Architecture
-
-<!-- Schéma Mermaid — détaillée à l'étape 5 -->
 
 ```mermaid
 flowchart LR
@@ -55,6 +65,7 @@ sequenceDiagram
     participant AM as Alertmanager
     participant Ag as Agent IA
     participant Oll as Ollama
+    participant K8s as API Kubernetes
 
     U->>App: GET /crash
     Note over App: le process meurt (exit 1)<br/>Kubernetes redémarre le pod
@@ -85,6 +96,8 @@ sequenceDiagram
 | `make` | — | Point d'entrée des scripts |
 | Python | 3.12 | Facultatif : tests et lint en local (`make test lint`) |
 | RAM libre | ~12 Go | Ollama charge un modèle de 14 milliards de paramètres |
+| Espace disque | ~15 Go | images, archives de chargement et modèle Ollama |
+| Accès réseau | `ghcr.io` (et `github.com` pour GitOps) | le kubelet tire les images du registre ; sans réseau, `make build` devient nécessaire |
 
 Sur Fedora :
 
@@ -112,9 +125,9 @@ Git : voir [Déploiement GitOps](#déploiement-gitops).
 > pour suivre le téléchargement :
 > `kubectl -n aiops logs deploy/ollama -c pull-model -f`.
 >
-> **Après une modification du code**, un `git push` suffit : GitHub Actions
-> construit et publie les images, puis Flux déploie le nouveau tag. Pour
-> travailler hors ligne, `make build` construit le tag du manifest et le
+> **Après une modification du code**, un `git push` sur `main` suffit : GitHub
+> Actions construit et publie les images, puis Flux déploie le nouveau tag.
+> Pour travailler hors ligne, `make build` construit le tag du manifest et le
 > charge dans le nœud.
 
 Puis ouvrez :
@@ -143,7 +156,6 @@ Git**. Un changement passe par un commit, se relit dans une pull request, et
 s'annule par un `git revert`.
 
 ```bash
-make build        # les images restent construites localement (voir plus bas)
 make gitops-up    # installe Flux, qui déploie la stack depuis la branche main
 make gitops-status
 ```
@@ -216,6 +228,11 @@ il remettrait l'URL du dépôt principal à chaque cycle, et un fork ne pourrait
 plus se déployer depuis sa propre branche. Le script l'applique une fois,
 avec l'URL et la branche demandées.
 
+> **Fork :** les noms d'images (`ghcr.io/abi0066/…`) sont écrits en dur dans
+> le workflow et dans les manifests. Un fork doit les remplacer par son propre
+> espace de noms GHCR, sinon il déploiera les images de ce dépôt. Le reste
+> (URL et branche) se règle avec `GITOPS_REPO_URL` et `GITOPS_BRANCH`.
+
 > **Les images viennent de GHCR.** Le kubelet les tire du registre
 > (`imagePullPolicy: IfNotPresent`) ; `make build` reste le repli hors ligne.
 > Voir [CI/CD des images](#cicd-des-images).
@@ -251,10 +268,23 @@ sequenceDiagram
 | Visibilité | packages publics | le kubelet tire sans secret ; un package privé demanderait un `imagePullSecret` |
 | Repli local | `make build` | construit le tag du manifest et le charge dans kind, pour travailler hors ligne |
 
+Le workflow (`.github/workflows/images-release.yml`) se déclenche sur un push
+vers `main` touchant `app/**`, `agent/**` ou le workflow lui-même.
+`workflow_dispatch` permet de publier sans changement de code. Une pull
+request ne publie rien : seuls les commits de `main` produisent des images.
+
+Deux réglages du dépôt sont nécessaires, une seule fois :
+
+- **Settings → Actions → General → Workflow permissions** : « Read and write
+  permissions ». Sans cela, le job de bump ne peut pas pousser son commit.
+- **Visibilité des packages** : publics, pour que le kubelet tire sans
+  `imagePullSecret`.
+
 Vérifié de bout en bout : le commit `642e773` a produit l'image
 `sha-642e773` (digest `sha256:d8bfa2…`), le commit de bump `0976317`, et le
-pod `demo-app-6f84c46f48-…` répond avec cette image. Le build précédent
-(`sha-c6591b9`) avait un autre digest : deux commits, deux images distinctes.
+pod alors en service (`demo-app-6f84…`) répondait avec cette image. Le build
+précédent (`sha-c6591b9`) avait un autre digest : deux commits, deux images
+distinctes.
 
 Trois pièges rencontrés, et ce qu'ils apprennent :
 
@@ -266,9 +296,42 @@ Trois pièges rencontrés, et ce qu'ils apprennent :
   protocole Docker Registry v2 demande d'abord un jeton anonyme ; le vrai
   test est `podman pull` sans être connecté.
 
+## Configuration de l'agent
+
+Tout se règle par variables d'environnement dans
+[`manifests/aiops-agent.yaml`](manifests/aiops-agent.yaml). Le tableau donne
+la valeur par défaut du code ; le manifest ne s'en écarte que pour
+`AUTOHEAL_MEMORY_MAX`.
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `OLLAMA_URL` | `http://ollama.aiops.svc.cluster.local:11434` | API du modèle |
+| `PROMETHEUS_URL` | `http://prometheus.aiops.svc.cluster.local:9090` | source des métriques |
+| `OLLAMA_MODEL` | `qwen2.5-coder:14b` | modèle utilisé (défini aussi dans la ConfigMap `ollama-config`) |
+| `WATCHED_NAMESPACE` | `aiops` | namespace analysé quand l'alerte n'en porte pas |
+| `LLM_TIMEOUT` | `300` s | délai maximal d'une inférence |
+| `DEDUP_WINDOW_S` | `600` s | fenêtre anti-doublon |
+| `LOG_LEVEL` | `INFO` | verbosité des logs |
+| `AUTOHEAL_ENABLED` | `false` | active l'action corrective |
+| `AUTOHEAL_DRY_RUN` | `true` | `dryRun=All` : le patch est validé sans être écrit |
+| `AUTOHEAL_MEMORY_FACTOR` | `1.5` | nouvelle limite = ancienne × facteur |
+| `AUTOHEAL_MEMORY_MAX` | `1Gi` (manifest : `512Mi`) | plafond de la limite |
+| `AUTOHEAL_COOLDOWN_S` | `3600` s | une action par Deployment et par fenêtre |
+
+Une valeur invalide (`AUTOHEAL_MEMORY_FACTOR=1`, `AUTOHEAL_MEMORY_MAX=abc`)
+fait **échouer le démarrage** du pod : l'erreur apparaît tout de suite, pas au
+premier incident. Les booléens sont stricts : seuls `1`, `true`, `yes` et
+`on` activent `AUTOHEAL_ENABLED` ; une faute de frappe comme `oui` laisse le
+système inactif, et toute valeur non reconnue pour `AUTOHEAL_DRY_RUN` laisse
+le dry-run.
+
+L'application de démonstration n'a qu'un réglage : `OOM_ALLOC_MB` (120 Mio),
+la quantité allouée par `/oom`. Avec la limite de `128Mi`, elle provoque
+l'OOMKill ; avec les `192Mi` d'après auto-guérison, la même requête passe.
+
 ## Tests et vérifications
 
-Tout se vérifie **sans cluster**.
+Les tests unitaires et `make validate` ne demandent aucun cluster.
 
 ```bash
 pip install -r agent/requirements.txt -r agent/requirements-dev.txt
@@ -296,8 +359,9 @@ chaque outil tourne dans un conteneur, à une version épinglée.
 | actionlint | les workflows GitHub Actions |
 
 Les mêmes vérifications tournent dans GitHub Actions à chaque push et pull
-request : `agent-ci` (lint + tests) et `infra-ci` (`make validate` + construction
-des deux images).
+request : `agent-ci` (lint + tests), `infra-ci` (`make validate` + construction
+des deux images) et `images-release` (publication GHCR + commit de bump, sur
+`main` uniquement).
 
 ## Structure du dépôt
 
@@ -337,7 +401,8 @@ des deux images).
 ├── terraform/            VPC AWS, socle réseau d'un futur EKS (jamais appliqué par défaut)
 ├── .github/workflows/    CI : agent-ci (lint + tests), infra-ci (validate + images),
 │                         images-release (publication GHCR + commit de bump)
-├── CHANGELOG.md          Historique, par pull request fusionnée
+├── CHANGELOG.md          Historique des changements notables
+├── LICENSE               Licence MIT
 ├── kind-config.yaml      Configuration du cluster local
 └── Makefile              Point d'entrée unique
 ```
@@ -381,18 +446,6 @@ métriques : nombre de redémarrages, raison du dernier arrêt, phase du pod.
 Sans lui, on ne peut pas distinguer un `CrashLoopBackOff` d'un `OOMKilled` en
 lisant les métriques — ce qui est précisément la distinction que l'agent devra
 faire.
-
-### Les images viennent de GHCR
-
-À l'étape 5, les images n'existaient que sur la machine : `make build` les
-chargeait dans le nœud, et `imagePullPolicy: Never` empêchait le kubelet de
-chercher ailleurs. L'étape 6 renverse la situation : les manifests portent un
-nom de registre (`ghcr.io/abi0066/…`) et `imagePullPolicy: IfNotPresent`
-laisse le kubelet tirer l'image publiée par la CI.
-
-Le repli local reste possible : `make build` lit le tag dans le manifest,
-construit la même référence et la charge dans kind. Le nœud la trouve sur
-place et ne tire rien. C'est ce qui permet de travailler hors ligne.
 
 ### `waitress` et non `gunicorn` : un choix de scénario
 
@@ -707,9 +760,12 @@ que l'agent devrait analyser un par un.
 Le tout reste du YAML versionné, sans CRD et sans Prometheus Operator : la
 décision « Prometheus vanilla » tient.
 
-### Les images passent dans le cluster par une archive
+### Le repli local charge l'image par une archive
 
-`kind` supporte Podman pour `kind create cluster`, mais `kind load docker-image`
+En temps normal, le kubelet tire les images de GHCR. `make build` sert au
+développement hors ligne : il construit le tag écrit dans le manifest et le
+charge dans le nœud. Ce chargement passe par une archive, parce que `kind`
+supporte Podman pour `kind create cluster`, mais `kind load docker-image`
 appelle `docker save` et `docker image inspect` en dur. Le message d'erreur est
 trompeur — `image: "X" not present locally` — alors que l'image est bien
 présente : `kind` n'interroge jamais Podman.
@@ -721,12 +777,18 @@ exécutable `docker` à installer.
 
 Deux détails qui comptent :
 
-- **les noms d'images ne sont écrits que dans les manifests.** Les scripts les
-  y lisent (`scripts/lib.sh`) : changer une version dans un manifest suffit,
-  le tag construit et chargé est toujours celui que le kubelet cherche ;
+- **les noms et tags d'images ne sont écrits que dans les manifests.** Les
+  scripts les y lisent (`scripts/lib.sh`) et c'est ce que réécrit le commit de
+  bump : une seule source, lue par `make build` comme par Flux ;
 - **une image déjà présente dans le nœud n'est pas rechargée** (l'archive
-  d'Ollama pèse plusieurs Go). Seules nos deux images, reconstruites sous le
-  même tag, sont rechargées à chaque `make build`.
+  d'Ollama pèse plusieurs Go). Seules nos deux images, reconstruites, sont
+  rechargées à chaque `make build`.
+
+> **Attention au tag.** Le tag `sha-<commit>` est immuable dans le registre.
+> `make build` reconstruit ce même tag avec votre copie de travail : si elle
+> contient des modifications non commitées, le nœud exécutera du code que le
+> commit ne contient pas. Pour un essai local, c'est voulu ; pour un tag qui
+> doit rester une preuve, reconstruisez depuis un arbre propre.
 
 ### Les conteneurs tournent sans privilèges
 
@@ -779,22 +841,6 @@ comme les outils de `make validate` : rien à installer sur l'hôte. L'interface
 web d'Argo CD est son vrai avantage — pour une démonstration en ligne de
 commande, elle ne justifie pas son coût.
 
-### Un commit de bump plutôt que Flux Image Automation
-
-Deux façons de mettre à jour l'image d'un Deployment depuis Git :
-
-| | Commit de bump (retenu) | Flux Image Automation |
-|---|---|---|
-| Qui écrit dans Git | GitHub Actions | un contrôleur Flux |
-| Contrôleurs Flux | 2 (inchangé) | 4 |
-| Jeton d'écriture dans le cluster | aucun | oui (clé de déploiement) |
-| Traçabilité | commit du bot, `git revert` | commit du bot, même principe |
-| Latence | un run de CI | un scan du registre |
-
-Le commit de bump ajoute une étape visible : la CI réécrit `manifests/*.yaml`
-puis pousse. C'est moins « magique », mais le cluster n'a aucun droit
-d'écriture sur le dépôt, et l'image déployée reste reliée à un commit.
-
 ### Les ConfigMaps de configuration sont générées par kustomize
 
 La configuration de Prometheus, ses règles d'alerte, celle d'Alertmanager et
@@ -813,6 +859,58 @@ Avec un nom fixe, le pod garderait l'ancienne configuration jusqu'à son
 prochain redémarrage. L'ancienne ConfigMap, qui n'est plus dans le rendu,
 est supprimée par Flux (`prune`).
 
+### Les images viennent de GHCR
+
+À l'étape 5, les images n'existaient que sur la machine : `make build` les
+chargeait dans le nœud, et `imagePullPolicy: Never` empêchait le kubelet de
+chercher ailleurs. L'étape 6 renverse la situation : les manifests portent un
+nom de registre (`ghcr.io/abi0066/…`) et `imagePullPolicy: IfNotPresent`
+laisse le kubelet tirer l'image publiée par la CI.
+
+Le repli local reste possible : `make build` lit le tag dans le manifest,
+construit la même référence et la charge dans kind. Le nœud la trouve sur
+place et ne tire rien. C'est ce qui permet de travailler hors ligne.
+
+### Un commit de bump plutôt que Flux Image Automation
+
+Deux façons de mettre à jour l'image d'un Deployment depuis Git :
+
+| | Commit de bump (retenu) | Flux Image Automation |
+|---|---|---|
+| Qui écrit dans Git | GitHub Actions | un contrôleur Flux |
+| Contrôleurs Flux | 2 (inchangé) | 4 |
+| Jeton d'écriture dans le cluster | aucun | oui (clé de déploiement) |
+| Traçabilité | commit du bot, `git revert` | commit du bot, même principe |
+| Latence | un run de CI | un scan du registre |
+
+Le commit de bump ajoute une étape visible : la CI réécrit `manifests/*.yaml`
+puis pousse. C'est moins « magique », mais le cluster n'a aucun droit
+d'écriture sur le dépôt, et l'image déployée reste reliée à un commit.
+
+## Dépannage
+
+Vérifier une installation en quatre commandes :
+
+```bash
+make status          # nœud et pods Ready
+curl -s http://localhost:30090/health
+make agent-health    # /health de l'agent et ses dépendances (Ollama, Prometheus)
+make gitops-status   # commit appliqué par Flux
+```
+
+| Symptôme | Cause probable | Action |
+|---|---|---|
+| `kubectl` : `connection refused` sur 8443 | le conteneur kind est arrêté (redémarrage de la machine) | `podman start k8s-aiops-control-plane`, puis attendre `Ready` |
+| Pod en `ErrImagePull` / `ImagePullBackOff` | package GHCR privé, tag absent, ou pas de réseau | `podman pull <image>` **sans** être connecté ; rendre le package public ; `kubectl describe pod` |
+| Pod en `ErrImageNeverPull` | manifest d'avant l'étape 6 (`imagePullPolicy: Never`) | `git pull`, puis `make gitops-sync` |
+| Pod tué mais `reason: Error` au lieu de `OOMKilled` | containerd n'a pas pu surveiller les OOMKill (inotify) | relever `fs.inotify.max_user_instances`, puis `rollout restart` |
+| `DemoAppCrashLooping` ne se déclenche pas | moins de 4 redémarrages en 5 min, ou `for: 1m` non écoulé | lire la colonne `RESTARTS`, attendre, relancer `make demo-crash` |
+| Webhook reçu mais pas de nouvel `ANALYSIS_RESULT` | alerte déjà `firing` (Alertmanager ne la renvoie qu'après `repeat_interval`, 4 h) ou anti-doublon | recréer le pod pour repartir d'un état propre, ou attendre la fin de la fenêtre |
+| L'agent répond mais `/health` renvoie 503 | Ollama ou Prometheus injoignable | `make agent-health`, puis les logs du pod concerné |
+| Flux ne voit pas un commit | intervalle de 1 min, ou erreur de lecture du dépôt | `make gitops-status`, puis `kubectl -n flux-system describe gitrepository k8s-aiops-agent` |
+| Une modification manuelle disparaît | correction de dérive de Flux (5 min) | comportement attendu : passer par Git |
+| `localhost:30090` déjà utilisé | un autre processus écoute le port | `ss -ltnp` |
+
 ## Limites connues
 
 Ce projet est une démonstration locale, pas une plateforme de production. Ce
@@ -829,7 +927,7 @@ qu'il ne couvre pas, et pourquoi :
 | Un seul nœud kind | pas de tolérance de panne, pas de scheduling multi-nœuds, pas de test de `PodDisruptionBudget` | EKS via `terraform/`, ou un cluster kind multi-nœuds |
 | Stockage éphémère | Prometheus, Alertmanager et Grafana sont en `emptyDir` : métriques, silences et utilisateurs sont perdus au redémarrage du pod | PVC (celui d'Ollama montre le mécanisme) |
 | Aucune authentification | Prometheus, Grafana (`admin`/`admin`) et l'agent sont exposés sans TLS sur des ports de nœud | Ingress + TLS + secrets, hors périmètre d'un cluster local |
-| Terraform jamais appliqué | `terraform/` décrit un VPC multi-AZ pour un futur EKS, sans aucun `apply` | à traiter avec l'étape 6 si le coût AWS est accepté |
+| Terraform jamais appliqué | `terraform/` décrit un VPC multi-AZ pour un futur EKS, sans aucun `apply` | à traiter dans une étape 7 (EKS) si le coût AWS est accepté |
 
 ## Nettoyage
 
@@ -841,9 +939,11 @@ make clean-images   # idem, et supprime aussi les deux images du projet
 Le modèle d'Ollama vit dans un volume du cluster : il est supprimé avec lui,
 et retéléchargé (~9 Go) au prochain `make cluster-up` ou `make gitops-up`.
 
-Rien n'est facturé : le cluster est local, et le Terraform n'est jamais
-appliqué par défaut.
+Rien n'est facturé : le cluster est local, le Terraform n'est jamais appliqué
+par défaut, et GitHub Actions comme GHCR sont gratuits pour un dépôt public.
 
 ## Licence
 
-À définir.
+MIT — voir [`LICENSE`](LICENSE). Le texte couvre le code et les manifests du
+dépôt ; les images de base et les composants tiers (kind, Prometheus, Grafana,
+Ollama, Flux…) gardent leurs licences respectives.

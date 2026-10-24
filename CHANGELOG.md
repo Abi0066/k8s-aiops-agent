@@ -5,6 +5,28 @@ n'a pas de numéro de version : chaque entrée correspond à une pull request
 fusionnée dans `main`. Le format s'inspire de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 
+## 2026-10-24 : revue du README
+
+Poussé directement sur `main`, sans pull request.
+
+### Ajouté
+- Sommaire et badges des trois workflows.
+- Section « Configuration de l'agent » : toutes les variables, leurs défauts
+  et le comportement en cas de valeur invalide.
+- Section « Dépannage » : symptôme → cause probable → action, avec les pièges
+  réellement rencontrés (image privée, inotify, alerte déjà `firing`).
+- Licence MIT (`LICENSE`).
+
+### Corrigé
+- `make build` n'est plus présenté comme obligatoire : les images viennent de
+  GHCR et `make build` est le repli hors ligne.
+- Le schéma de séquence déclarait implicitement le participant `K8s` ; il est
+  maintenant explicite.
+- Prérequis : accès réseau à GHCR et espace disque ajoutés.
+- Fork : les noms d'images GHCR sont codés en dur et doivent être remplacés.
+- Limites : Terraform renvoyé à une étape 7, l'étape 6 étant terminée.
+- `CHANGELOG` : les entrées ne correspondent plus uniquement à des PR.
+
 ## 2026-10-24 : CI/CD des images (étape 6)
 
 Poussé directement sur `main`, sans pull request.
