@@ -37,7 +37,7 @@ help:
 setup:
 	@./scripts/setup.sh
 
-## cluster-up : crée le cluster kind et déploie les étapes 1 à 3
+## cluster-up : crée le cluster kind et déploie les étapes 1 à 4
 cluster-up:
 	@./scripts/cluster-up.sh
 

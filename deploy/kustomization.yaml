@@ -1,4 +1,4 @@
-# Point d'entrée unique du déploiement : toute la stack (étapes 1 à 3).
+# Point d'entrée unique du déploiement : toute la stack (étapes 1 à 4).
 #
 # C'est ce dossier qu'applique `make cluster-up` (kubectl apply -k deploy)
 # et ce dossier que Flux synchronise depuis Git (deploy/flux-sync.yaml) :

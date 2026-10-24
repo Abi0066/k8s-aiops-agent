@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# cluster-up.sh — Crée le cluster kind et y déploie le projet (étapes 1 à 3).
+# cluster-up.sh — Crée le cluster kind et y déploie le projet (étapes 1 à 4).
 #
 # Déploiement « à la main » : kubectl applique les manifests du disque, y
 # compris ceux qui ne sont pas encore commités. C'est le mode du
@@ -54,7 +54,7 @@ wait_for_pods
 
 echo
 log "============================================================"
-log " Étapes 1 à 3 déployées."
+log " Étapes 1 à 4 déployées."
 log "============================================================"
 print_access
 log "============================================================"

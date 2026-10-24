@@ -1,6 +1,6 @@
 # K8s AI Ops Agent — Diagnostic et auto-guérison d'incidents Kubernetes avec un agent IA local
 
-> **Projet en cours — étapes 1 à 3 et 5 (GitOps) terminées.**
+> **Projet en cours — étapes 1 à 5 terminées ; étape 6 (CI/CD des images) à venir.**
 > Construit comme projet d'apprentissage pour comprendre chaque brique de bout en bout.
 
 ## Le problème
@@ -81,7 +81,7 @@ sequenceDiagram
 |---|---|---|
 | Podman **ou** Docker | Podman 3.0+ / Docker 20.10+ | Runtime de conteneurs pour `kind` |
 | `br_netfilter` | noyau | Fait passer le trafic des pods dans iptables. Sans lui, le réseau interne K8s est cassé |
-| Instances inotify | noyau, 512 au moins | containerd en ouvre une par conteneur pour être prévenu des OOMKill. À 128, la valeur par défaut, il n'y arrive plus : un pod tué par manque de mémoire apparaît `Error` au lieu de `OOMKilled` et l'auto-guérison ne se déclenche pas |
+| Instances inotify | noyau, 512 au moins | containerd en ouvre une par conteneur pour être prévenu des OOMKill. À la valeur par défaut (128), la session peut les avoir déjà consommées : containerd n'arrive plus à s'abonner, un pod tué par manque de mémoire apparaît `Error` au lieu de `OOMKilled`, et l'auto-guérison ne se déclenche pas. La valeur courante se lit avec `cat /proc/sys/fs/inotify/max_user_instances` |
 | `make` | — | Point d'entrée des scripts |
 | Python | 3.12 | Facultatif : tests et lint en local (`make test lint`) |
 | RAM libre | ~12 Go | Ollama charge un modèle de 14 milliards de paramètres |
@@ -101,7 +101,7 @@ systemctl --user enable --now podman.socket
 ```bash
 make setup        # installe kind + kubectl dans ~/.local/bin (sans root)
 make build        # construit les images de l'application et de l'agent
-make cluster-up   # crée le cluster, y charge les images, déploie les étapes 1 à 3
+make cluster-up   # crée le cluster, y charge les images, déploie les étapes 1 à 4
 make demo-crash   # provoque un incident et affiche le diagnostic
 ```
 
@@ -155,7 +155,7 @@ flowchart LR
             SC["source-controller<br/>GitRepository"]
             KC["kustomize-controller<br/>Kustomization"]
         end
-        Stack["namespace aiops<br/>la stack des étapes 1 à 3"]
+        Stack["namespace aiops<br/>la stack des étapes 1 à 4"]
     end
     SC -->|interroge toutes les minutes| GH
     SC -->|archive du commit| KC
@@ -184,6 +184,18 @@ Ce que ces réglages apportent :
   (`Applied revision: main@sha1:…`) ; la Kustomization n'est `Ready` que
   lorsque tous les objets le sont (`wait: true`), pas seulement acceptés par
   l'API.
+
+Les deux comportements qui distinguent GitOps d'un `kubectl apply` ont été
+mesurés sur le cluster, pas seulement lus dans la configuration :
+
+| Test | Commande | Résultat observé |
+|---|---|---|
+| Correction de dérive | `kubectl -n aiops scale deploy/demo-app --replicas=3` | retour à 1 réplica en **311 s**, sans autre action |
+| `prune` | ConfigMap ajouté puis retiré de Git | créé par Flux, puis supprimé (`NotFound`) |
+
+La dérive n'est pas corrigée instantanément : elle attend le prochain cycle de
+la Kustomization (`interval: 5m`). C'est le prix de l'intervalle — un
+`make gitops-sync` force la réconciliation quand l'attente gêne.
 
 Pour forcer une synchronisation sans attendre l'intervalle :
 
@@ -293,6 +305,7 @@ des deux images).
 | 3 | Agent IA : service FastAPI, collecte de preuves, LLM local | ✅ |
 | 4 | Action : auto-guérison avec mode dry-run par défaut | ✅ |
 | 5 | GitOps : Flux synchronise le cluster depuis Git, CI GitHub Actions | ✅ |
+| 6 | CI/CD des images : build dans GitHub Actions, publication dans un registre, déploiement du tag par Flux | ⏳ |
 
 ## Choix techniques et justification
 
@@ -730,6 +743,22 @@ Deployment, donc Kubernetes recrée le pod avec la nouvelle configuration.
 Avec un nom fixe, le pod garderait l'ancienne configuration jusqu'à son
 prochain redémarrage. L'ancienne ConfigMap, qui n'est plus dans le rendu,
 est supprimée par Flux (`prune`).
+
+## Limites connues
+
+Ce projet est une démonstration locale, pas une plateforme de production. Ce
+qu'il ne couvre pas, et pourquoi :
+
+| Limite | Conséquence | Piste |
+|---|---|---|
+| Les images ne passent pas par Git | `imagePullPolicy: Never` + `kind load` : après une modification de `app/` ou `agent/`, `make build` reste obligatoire. Un `git push` seul ne change pas le code exécuté | étape 6 : construire dans GitHub Actions, publier dans GHCR, laisser Flux appliquer le nouveau tag |
+| Auto-guérison volontairement étroite | un seul cas (`OOMKilled`, confiance `high`), une seule action (relever la limite), plafond `512Mi`, une action par heure | ajouter une action seulement après avoir défini son dry-run et son retour arrière |
+| Le correctif mémoire est écrasé par Git | l'annotation `aiops-agent/autoheal-memory` le signale ; le prochain `apply` remet `128Mi` | reporter la valeur dans le dépôt, ou corriger la consommation de l'application |
+| Anti-doublon par alerte, pas par pod | `DemoAppCrashLooping` et `DemoAppDown` ont chacune leur empreinte : un même pod produit deux analyses LLM | dédupliquer par `namespace/pod` sur une fenêtre courte |
+| Un seul nœud kind | pas de tolérance de panne, pas de scheduling multi-nœuds, pas de test de `PodDisruptionBudget` | EKS via `terraform/`, ou un cluster kind multi-nœuds |
+| Stockage éphémère | Prometheus, Alertmanager et Grafana sont en `emptyDir` : métriques, silences et utilisateurs sont perdus au redémarrage du pod | PVC (celui d'Ollama montre le mécanisme) |
+| Aucune authentification | Prometheus, Grafana (`admin`/`admin`) et l'agent sont exposés sans TLS sur des ports de nœud | Ingress + TLS + secrets, hors périmètre d'un cluster local |
+| Terraform jamais appliqué | `terraform/` décrit un VPC multi-AZ pour un futur EKS, sans aucun `apply` | à traiter avec l'étape 6 si le coût AWS est accepté |
 
 ## Nettoyage
 
