@@ -18,3 +18,4 @@ resources:
   - demo-app.yaml
   - ollama.yaml
   - aiops-agent.yaml
+  - prune-test.yaml
