@@ -5,6 +5,17 @@ n'a pas de numéro de version : chaque entrée correspond à une pull request
 fusionnée dans `main`. Le format s'inspire de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 
+## 2026-10-24 : GIF de démonstration et dernier diagnostic
+
+Poussé directement sur `main`, sans pull request.
+
+### Ajouté
+- `docs/screenshots/demo.gif` : quatre crashes, l'état du pod, puis le verdict
+  de l'agent. Session réelle enregistrée avec `asciinema`, accélérée et
+  aplatie sur le fond du thème.
+- `scripts/last-analysis.sh` et `make last-analysis` : extraient le dernier
+  `ANALYSIS_RESULT` et n'affichent que le verdict, la remédiation et la durée.
+
 ## 2026-10-24 : captures d'écran et lisibilité du dashboard
 
 Poussé directement sur `main`, sans pull request.

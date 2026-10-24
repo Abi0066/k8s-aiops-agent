@@ -16,7 +16,7 @@ NAMESPACE    ?= aiops
 
 .PHONY: help setup cluster-up cluster-down build demo-crash demo-oom \
         status logs ports clean-images agent-logs agent-health test lint validate \
-        gitops-up gitops-sync gitops-status
+        gitops-up gitops-sync gitops-status last-analysis
 
 ## help : affiche cette aide
 help:
@@ -102,6 +102,10 @@ agent-health:
 		c = http.client.HTTPConnection('localhost', 8080, timeout=10); \
 		c.request('GET', '/health'); r = c.getresponse(); \
 		print(r.status, r.read().decode()); sys.exit(r.status != 200)"
+
+## last-analysis : dernier diagnostic de l'agent, formaté
+last-analysis:
+	@./scripts/last-analysis.sh
 
 ## ports : affiche les URL d'accès aux services
 ports:
