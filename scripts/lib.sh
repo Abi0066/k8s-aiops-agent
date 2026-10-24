@@ -152,9 +152,13 @@ prepare_cluster() {
 # le déploiement continue, on affiche seulement où regarder.
 wait_for_pods() {
     log "Attente que les pods soient prêts (timeout 600s)..."
+    # status.phase!=Succeeded écarte les pods TERMINÉS (un Job, un test de
+    # pull d'image). Un pod Completed n'est jamais Ready : sans ce filtre,
+    # kubectl wait échoue et le déploiement annonce à tort un incident.
     if ! kubectl wait --for=condition=Ready pod \
             --namespace="$NAMESPACE" \
             --all \
+            --field-selector=status.phase!=Succeeded \
             --timeout=600s 2>/dev/null; then
         warn "Tous les pods ne sont pas Ready. État actuel :"
         kubectl get pods --namespace="$NAMESPACE"
