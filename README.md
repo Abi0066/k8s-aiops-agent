@@ -50,11 +50,11 @@ annotation n'est écrite.
 
 ![Extrait d'ANALYSIS_RESULT : verdict OOMKilled, remédiation dry-run de 128Mi vers 192Mi, limite toujours à 128Mi](docs/screenshots/analyse-oom.png)
 
-**La boucle complète** — quatre crashes, l'alerte, puis le verdict de l'agent.
-L'enregistrement est accéléré : la pause visible correspond au `for: 1m` de la
-règle et à l'inférence du LLM local.
+**La boucle complète** — quatre crashes, l'état du pod, l'attente de l'alerte,
+puis le verdict de l'agent. L'enregistrement est accéléré : la pause visible
+correspond au `for: 1m` de la règle et à l'inférence du LLM local.
 
-![Démonstration en terminal : quatre crashes, CrashLoopBackOff, puis le diagnostic de l'agent](docs/screenshots/demo.gif)
+![Démonstration en terminal : quatre crashes, l'état du pod, l'attente de l'alerte, puis le diagnostic de l'agent](docs/screenshots/demo.gif)
 
 ## Architecture
 
