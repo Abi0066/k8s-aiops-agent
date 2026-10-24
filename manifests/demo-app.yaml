@@ -39,7 +39,7 @@ spec:
           # imagePullPolicy: Never est indispensable : sans lui, le kubelet
           # tente de tirer l'image depuis un registre distant et échoue
           # (ErrImagePull) puisque l'image n'existe que localement.
-          image: ghcr.io/abi0066/k8s-aiops-demo-app:sha-c6591b9
+          image: ghcr.io/abi0066/k8s-aiops-demo-app:sha-642e773
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
