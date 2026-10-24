@@ -7,10 +7,10 @@
 [![infra-ci](https://github.com/Abi0066/k8s-aiops-agent/actions/workflows/infra-ci.yml/badge.svg)](https://github.com/Abi0066/k8s-aiops-agent/actions/workflows/infra-ci.yml)
 [![images-release](https://github.com/Abi0066/k8s-aiops-agent/actions/workflows/images-release.yml/badge.svg)](https://github.com/Abi0066/k8s-aiops-agent/actions/workflows/images-release.yml)
 
-**Sommaire** — [Le problème](#le-problème) · [Architecture](#architecture) ·
-[Prérequis](#prérequis) · [Démarrage rapide](#démarrage-rapide) ·
-[GitOps](#déploiement-gitops) · [CI/CD](#cicd-des-images) ·
-[Configuration de l'agent](#configuration-de-lagent) ·
+**Sommaire** — [Aperçu](#aperçu) · [Le problème](#le-problème) ·
+[Architecture](#architecture) · [Prérequis](#prérequis) ·
+[Démarrage rapide](#démarrage-rapide) · [GitOps](#déploiement-gitops) ·
+[CI/CD](#cicd-des-images) · [Configuration de l'agent](#configuration-de-lagent) ·
 [Tests](#tests-et-vérifications) · [Structure](#structure-du-dépôt) ·
 [Étapes](#étapes-du-projet) · [Choix techniques](#choix-techniques-et-justification) ·
 [Dépannage](#dépannage) · [Limites](#limites-connues) · [Licence](#licence).
@@ -28,6 +28,27 @@ propose une cause racine. Depuis l'étape 4, il corrige aussi lui-même
 l'incident qu'il sait trancher avec certitude (un conteneur tué pour
 dépassement de mémoire) — en mode `dry-run` par défaut, jamais en écriture
 directe sans décision humaine.
+
+## Aperçu
+
+**Le tableau de bord** agrège les signaux que l'agent collecte : requêtes,
+redémarrages, mémoire, statut des pods, latence, CPU. Les pics de mémoire
+correspondent aux OOMKill provoqués par la démo.
+
+![Tableau de bord Grafana : requêtes par seconde, redémarrages, mémoire du pod, statut, latence p95/p99, requêtes par endpoint et CPU/mémoire](docs/screenshots/grafana-dashboard.png)
+
+**La détection** — Prometheus charge les trois groupes de règles. Un seul
+OOMKill suffit à faire passer `DemoAppOOMKilled` en `FIRING`, sans attendre une
+boucle de redémarrages.
+
+![Page Alerts de Prometheus : DemoAppOOMKilled en FIRING, les autres règles inactives](docs/screenshots/prometheus-alertes.png)
+
+**Le diagnostic** — l'agent croise les preuves, tranche `OOMKilled` avec une
+confiance `high`, et prépare un patch `128Mi → 192Mi`. En `dry-run`, le serveur
+d'API valide le patch sans l'enregistrer : la limite reste `128Mi` et aucune
+annotation n'est écrite.
+
+![Extrait d'ANALYSIS_RESULT : verdict OOMKilled, remédiation dry-run de 128Mi vers 192Mi, limite toujours à 128Mi](docs/screenshots/analyse-oom.png)
 
 ## Architecture
 
@@ -385,6 +406,7 @@ des deux images) et `images-release` (publication GHCR + commit de bump, sur
 ├── deploy/               Point d'entrée du déploiement (étape 5)
 │   ├── kustomization.yaml  Assemble manifests/ et monitoring/
 │   └── flux-sync.yaml    Ce que Flux surveille (dépôt, branche) et applique
+├── docs/screenshots/     Captures utilisées par ce README
 ├── manifests/            Manifests Kubernetes
 │   ├── kustomization.yaml  Liste des manifests déployés
 │   ├── namespace.yaml    Le namespace aiops

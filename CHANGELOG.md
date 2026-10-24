@@ -5,6 +5,23 @@ n'a pas de numéro de version : chaque entrée correspond à une pull request
 fusionnée dans `main`. Le format s'inspire de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 
+## 2026-10-24 : captures d'écran et lisibilité du dashboard
+
+Poussé directement sur `main`, sans pull request.
+
+### Ajouté
+- `docs/screenshots/` : tableau de bord Grafana, alertes Prometheus et extrait
+  d'`ANALYSIS_RESULT` en dry-run, rassemblés dans une section « Aperçu » du
+  README.
+
+### Corrigé
+- Grafana : le panneau « Mémoire du pod » affichait `27 MiB` en rouge faute de
+  paliers ; il a désormais des seuils vert/orange/rouge à 100 et 128 MiB.
+- Grafana : la mémoire du panneau CPU/mémoire passe sur l'axe de droite en
+  unités lisibles (MiB) au lieu d'octets bruts.
+- Grafana : trois titres raccourcis pour ne plus être tronqués à 1024 px de
+  large.
+
 ## 2026-10-24 : revue du README
 
 Poussé directement sur `main`, sans pull request.
