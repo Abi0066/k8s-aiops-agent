@@ -123,8 +123,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: aiops-agent
-          image: localhost/aiops-agent:1.1.0
-          imagePullPolicy: Never
+          image: ghcr.io/abi0066/k8s-aiops-agent:sha-c6591b9
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080
