@@ -92,7 +92,13 @@ def health():
     répond. Un vrai service vérifierait ses dépendances ici.
     """
     REQUESTS.labels(endpoint="health").inc()
-    return jsonify(status="ok", service="demo-app"), 200
+    # Le nom du pod change à chaque rollout : il rend visible, depuis
+    # l'extérieur, qu'une nouvelle image est bien en service.
+    return jsonify(
+        status="ok",
+        service="demo-app",
+        pod=os.environ.get("HOSTNAME", "unknown"),
+    ), 200
 
 
 @app.route("/crash")
