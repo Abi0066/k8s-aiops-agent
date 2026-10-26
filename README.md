@@ -1,3 +1,5 @@
+[🇬🇧 English version](README.en.md)
+
 # K8s AI Ops Agent — Diagnostic et auto-guérison d'incidents Kubernetes avec un agent IA local
 
 > **Projet en cours — étapes 1 à 6 terminées.**
